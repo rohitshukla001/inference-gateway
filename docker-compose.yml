@@ -1,0 +1,35 @@
+services:
+  # ---- Infrastructure ----
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ig-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ig-postgres
+    environment:
+      POSTGRES_USER: inference
+      POSTGRES_PASSWORD: inference
+      POSTGRES_DB: inference_gateway
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ig-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  pg_data:

@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package inference.v1;
+
+option go_package = "github.com/rshuklas/inference-gateway/proto/inference/v1;inferencev1";
+
+// InferenceService defines the gRPC contract between Gateway and Orchestrator.
+service InferenceService {
+  // ExecuteInference sends a prompt to the configured provider and returns the response.
+  rpc ExecuteInference(ExecuteInferenceRequest) returns (ExecuteInferenceResponse);
+
+  // HealthCheck returns the health status of the orchestrator service.
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ExecuteInferenceRequest carries the prompt and optional model configuration.
+message ExecuteInferenceRequest {
+  // The input prompt to send to the LLM provider.
+  string prompt = 1;
+
+  // Optional: model name override (e.g., "llama3.2", "mistral").
+  // If empty, the orchestrator uses its default model.
+  string model = 2;
+
+  // Optional: provider name override (e.g., "ollama").
+  // If empty, the orchestrator uses its default provider.
+  string provider = 3;
+}
+
+// ExecuteInferenceResponse carries the LLM output back to the gateway.
+message ExecuteInferenceResponse {
+  // The generated text response from the LLM.
+  string output = 1;
+
+  // The model that was used to generate the response.
+  string model = 2;
+
+  // The provider that served the request.
+  string provider = 3;
+
+  // Token usage metadata.
+  TokenUsage usage = 4;
+}
+
+// TokenUsage tracks token consumption for observability and cost tracking.
+message TokenUsage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;     // "SERVING" or "NOT_SERVING"
+  string service = 2;    // service name
+  string version = 3;    // service version
+}
