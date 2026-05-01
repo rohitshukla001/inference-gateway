@@ -5,24 +5,39 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/rshuklas/inference-gateway/internal/jobs"
+	"github.com/rshuklas/inference-gateway/internal/tenant"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
+// JobsService is the subset of the jobs facade the handler needs. Defined as
+// an interface so handler tests can stub it without Postgres or NATS.
+type JobsService interface {
+	Submit(ctx context.Context, tenantID string, requestPayload []byte) (string, error)
+	Get(ctx context.Context, tenantID, jobID string) (*jobs.Job, error)
+}
+
 // Handler holds the HTTP handlers for the gateway API.
 type Handler struct {
 	orchestratorClient pb.InferenceServiceClient
+	jobs               JobsService
 }
 
-// NewHandler creates a new gateway handler with the given orchestrator gRPC client.
-func NewHandler(client pb.InferenceServiceClient) *Handler {
+// NewHandler creates a new gateway handler with the given orchestrator gRPC
+// client and jobs service. jobsSvc may be nil if the caller does not wire
+// async endpoints (the sync handler still works).
+func NewHandler(client pb.InferenceServiceClient, jobsSvc JobsService) *Handler {
 	return &Handler{
 		orchestratorClient: client,
+		jobs:               jobsSvc,
 	}
 }
 
@@ -71,6 +86,24 @@ type OrchestratorHealth struct {
 type ErrorResponse struct {
 	Error string `json:"error"`
 	Code  int    `json:"code"`
+}
+
+// SubmitAsyncResponse is returned from POST /v1/inference/execute_async.
+type SubmitAsyncResponse struct {
+	JobID  string `json:"job_id"`
+	Status string `json:"status"`
+}
+
+// JobStatusResponse is returned from GET /v1/jobs/{id}. Result and Error
+// are present only when the job has completed or failed respectively.
+type JobStatusResponse struct {
+	JobID       string           `json:"job_id"`
+	Status      string           `json:"status"`
+	CreatedAt   time.Time        `json:"created_at"`
+	StartedAt   *time.Time       `json:"started_at,omitempty"`
+	CompletedAt *time.Time       `json:"completed_at,omitempty"`
+	Result      *ExecuteResponse `json:"result,omitempty"`
+	Error       string           `json:"error,omitempty"`
 }
 
 // --- HTTP Handlers ---
@@ -154,6 +187,119 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 		resp.Orchestrator = &OrchestratorHealth{
 			Status:  healthResp.GetStatus(),
 			Version: healthResp.GetVersion(),
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// HandleSubmitAsync handles POST /v1/inference/execute_async. It validates
+// the request, persists a pending job, publishes it to the worker queue, and
+// returns the job_id immediately.
+func (h *Handler) HandleSubmitAsync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "async endpoint not enabled")
+		return
+	}
+
+	t := tenant.FromContext(r.Context())
+	if t == nil {
+		writeError(w, http.StatusUnauthorized, "missing tenant context")
+		return
+	}
+
+	var req ExecuteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Prompt == "" {
+		writeError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+
+	payload, err := json.Marshal(req)
+	if err != nil {
+		log.Printf("[gateway] async marshal failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to encode request")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	jobID, err := h.jobs.Submit(ctx, t.ID, payload)
+	if err != nil {
+		log.Printf("[gateway] async submit failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to submit job")
+		return
+	}
+
+	log.Printf("[gateway] async job submitted | tenant=%s job=%s", t.ID, jobID)
+
+	writeJSON(w, http.StatusAccepted, SubmitAsyncResponse{
+		JobID:  jobID,
+		Status: string(jobs.StatusPending),
+	})
+}
+
+// HandleJobStatus handles GET /v1/jobs/{job_id}.
+func (h *Handler) HandleJobStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "async endpoint not enabled")
+		return
+	}
+
+	t := tenant.FromContext(r.Context())
+	if t == nil {
+		writeError(w, http.StatusUnauthorized, "missing tenant context")
+		return
+	}
+
+	jobID := strings.TrimPrefix(r.URL.Path, "/v1/jobs/")
+	jobID = strings.TrimSuffix(jobID, "/")
+	if jobID == "" || strings.Contains(jobID, "/") {
+		writeError(w, http.StatusBadRequest, "job_id is required")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	job, err := h.jobs.Get(ctx, t.ID, jobID)
+	if err != nil {
+		if errors.Is(err, jobs.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "job not found")
+			return
+		}
+		log.Printf("[gateway] job get failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to load job")
+		return
+	}
+
+	resp := JobStatusResponse{
+		JobID:       job.JobID,
+		Status:      string(job.Status),
+		CreatedAt:   job.CreatedAt,
+		StartedAt:   job.StartedAt,
+		CompletedAt: job.CompletedAt,
+		Error:       job.ErrorMessage,
+	}
+
+	if job.Status == jobs.StatusCompleted && len(job.ResponsePayload) > 0 {
+		var result ExecuteResponse
+		if err := json.Unmarshal(job.ResponsePayload, &result); err != nil {
+			log.Printf("[gateway] response payload decode failed for job=%s: %v", job.JobID, err)
+		} else {
+			resp.Result = &result
 		}
 	}
 

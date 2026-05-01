@@ -17,6 +17,8 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/gateway"
 	"github.com/rshuklas/inference-gateway/internal/gateway/grpcclient"
 	"github.com/rshuklas/inference-gateway/internal/gateway/middleware"
+	"github.com/rshuklas/inference-gateway/internal/jobs"
+	"github.com/rshuklas/inference-gateway/internal/messaging/natsclient"
 	igredis "github.com/rshuklas/inference-gateway/internal/redis"
 	"github.com/rshuklas/inference-gateway/internal/tenant"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
@@ -62,6 +64,22 @@ func main() {
 	defer rdsClient.Close()
 	log.Println("[gateway] redis connected")
 
+	// NATS for async job queue. If the broker is down at startup we still
+	// boot - the sync path stays healthy and the async endpoint reports 503.
+	natsConn, err := natsclient.Connect(cfg.NATSURL)
+	if err != nil {
+		log.Printf("[gateway] nats connect failed (async disabled): %v", err)
+	} else {
+		defer natsConn.Close()
+		log.Printf("[gateway] nats connected to %s", cfg.NATSURL)
+	}
+
+	var jobsSvc gateway.JobsService
+	if natsConn != nil {
+		jobsRepo := jobs.NewRepository(pool)
+		jobsSvc = jobs.NewService(jobsRepo, jobs.NewNATSPublisher(natsConn))
+	}
+
 	// gRPC client to orchestrator with tenant-propagating interceptor.
 	conn, err := grpc.NewClient(
 		cfg.OrchestratorGRPCAddr,
@@ -74,7 +92,7 @@ func main() {
 	defer conn.Close()
 
 	client := pb.NewInferenceServiceClient(conn)
-	handler := gateway.NewHandler(client)
+	handler := gateway.NewHandler(client, jobsSvc)
 
 	authMW := middleware.Auth(tenantRepo)
 	idempotencyMW := middleware.Idempotency(rdsClient, cfg.IdempotencyTTL)
@@ -86,6 +104,14 @@ func main() {
 	mux.Handle(
 		"/v1/inference/execute",
 		authMW(idempotencyMW(http.HandlerFunc(handler.HandleExecute))),
+	)
+	mux.Handle(
+		"/v1/inference/execute_async",
+		authMW(http.HandlerFunc(handler.HandleSubmitAsync)),
+	)
+	mux.Handle(
+		"/v1/jobs/",
+		authMW(http.HandlerFunc(handler.HandleJobStatus)),
 	)
 
 	addr := fmt.Sprintf(":%s", cfg.HTTPPort)
