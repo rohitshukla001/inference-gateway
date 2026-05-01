@@ -1,4 +1,4 @@
-.PHONY: proto run-gateway run-orchestrator build up down clean test help
+.PHONY: proto run-gateway run-orchestrator run-worker build up down clean test help
 
 # ---- Proto Generation ----
 
@@ -23,6 +23,7 @@ build:
 	@echo "==> Building binaries..."
 	go build -o bin/gateway ./cmd/gateway
 	go build -o bin/orchestrator ./cmd/orchestrator
+	go build -o bin/worker ./cmd/worker
 	@echo "==> Done."
 
 # ---- Run Services ----
@@ -34,6 +35,10 @@ run-gateway:
 run-orchestrator:
 	@echo "==> Starting orchestrator on :9090..."
 	go run ./cmd/orchestrator
+
+run-worker:
+	@echo "==> Starting async worker..."
+	go run ./cmd/worker
 
 # ---- Docker Compose (Infrastructure) ----
 
@@ -88,6 +93,7 @@ help:
 	@echo "  make build              Build gateway + orchestrator binaries"
 	@echo "  make run-gateway        Run gateway service (HTTP :8080)"
 	@echo "  make run-orchestrator   Run orchestrator service (gRPC :9090)"
+	@echo "  make run-worker         Run async job worker"
 	@echo "  make up                 Start infrastructure (Docker)"
 	@echo "  make down               Stop infrastructure"
 	@echo "  make test               Run unit tests"
