@@ -3,6 +3,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -19,15 +20,18 @@ type GatewayConfig struct {
 
 // OrchestratorConfig holds configuration for the orchestrator service.
 type OrchestratorConfig struct {
-	GRPCPort       string
-	AdminPort      string
-	OllamaEndpoint string
-	DefaultModel   string
-	OllamaTimeout  time.Duration
-	PostgresURL    string
-	RedisURL       string
-	OTLPEndpoint   string
-	CacheTTL       time.Duration
+	GRPCPort         string
+	AdminPort        string
+	OllamaEndpoint   string
+	DefaultModel     string
+	OllamaTimeout    time.Duration
+	PostgresURL      string
+	RedisURL         string
+	OTLPEndpoint     string
+	CacheTTL         time.Duration
+	RetryMaxAttempts int
+	RetryBaseBackoff time.Duration
+	RetryMaxBackoff  time.Duration
 }
 
 // WorkerConfig holds configuration for the async worker service.
@@ -74,11 +78,14 @@ func LoadOrchestratorConfig() *OrchestratorConfig {
 		AdminPort:      getEnv("ORCHESTRATOR_ADMIN_PORT", "9091"),
 		OllamaEndpoint: getEnv("OLLAMA_ENDPOINT", "http://localhost:11434"),
 		DefaultModel:   getEnv("OLLAMA_DEFAULT_MODEL", "llama3.2"),
-		OllamaTimeout:  getDuration("OLLAMA_TIMEOUT", 120*time.Second),
-		PostgresURL:    getEnv("POSTGRES_URL", "postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable"),
-		RedisURL:       getEnv("REDIS_URL", "redis://localhost:6379/0"),
-		OTLPEndpoint:   getEnv("OTLP_ENDPOINT", "localhost:4317"),
-		CacheTTL:       getDuration("CACHE_TTL", 1*time.Hour),
+		OllamaTimeout:    getDuration("OLLAMA_TIMEOUT", 120*time.Second),
+		PostgresURL:      getEnv("POSTGRES_URL", "postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable"),
+		RedisURL:         getEnv("REDIS_URL", "redis://localhost:6379/0"),
+		OTLPEndpoint:     getEnv("OTLP_ENDPOINT", "localhost:4317"),
+		CacheTTL:         getDuration("CACHE_TTL", 1*time.Hour),
+		RetryMaxAttempts: getInt("RETRY_MAX_ATTEMPTS", 3),
+		RetryBaseBackoff: getDuration("RETRY_BASE_BACKOFF", 100*time.Millisecond),
+		RetryMaxBackoff:  getDuration("RETRY_MAX_BACKOFF", 2*time.Second),
 	}
 }
 
@@ -93,6 +100,15 @@ func getDuration(key string, fallback time.Duration) time.Duration {
 	if val, ok := os.LookupEnv(key); ok {
 		if d, err := time.ParseDuration(val); err == nil {
 			return d
+		}
+	}
+	return fallback
+}
+
+func getInt(key string, fallback int) int {
+	if val, ok := os.LookupEnv(key); ok {
+		if n, err := strconv.Atoi(val); err == nil {
+			return n
 		}
 	}
 	return fallback

@@ -40,6 +40,7 @@ type Service struct {
 	policyRepo *policy.Repository
 	budgetRepo *budget.Repository
 	metrics    *metrics.Metrics
+	retry      RetryConfig
 }
 
 // Deps groups the runtime dependencies the service needs. Using a struct
@@ -52,6 +53,7 @@ type Deps struct {
 	PolicyRepo *policy.Repository
 	BudgetRepo *budget.Repository
 	Metrics    *metrics.Metrics
+	Retry      RetryConfig
 }
 
 // NewService constructs the orchestrator with its dependencies. Providers must
@@ -65,6 +67,7 @@ func NewService(d Deps) *Service {
 		policyRepo: d.PolicyRepo,
 		budgetRepo: d.BudgetRepo,
 		metrics:    d.Metrics,
+		retry:      d.Retry,
 	}
 }
 
@@ -261,7 +264,7 @@ func (s *Service) executeWithFallback(
 
 	primaryProv, ok := s.providers[decision.Primary.Provider]
 	if ok {
-		result, err := primaryProv.Execute(ctx, &provider.InferenceRequest{
+		result, err := s.executeWithRetry(ctx, primaryProv, &provider.InferenceRequest{
 			Prompt: prompt,
 			Model:  decision.Primary.Model,
 		})
@@ -286,7 +289,7 @@ func (s *Service) executeWithFallback(
 	}
 
 	log.Printf("[orchestrator] fallback to %s/%s", decision.Fallback.Provider, decision.Fallback.Model)
-	result, err := fbProv.Execute(ctx, &provider.InferenceRequest{
+	result, err := s.executeWithRetry(ctx, fbProv, &provider.InferenceRequest{
 		Prompt: prompt,
 		Model:  decision.Fallback.Model,
 	})

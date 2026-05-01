@@ -41,6 +41,8 @@ func main() {
 	log.Printf("[orchestrator] default model: %s", cfg.DefaultModel)
 	log.Printf("[orchestrator] ollama timeout: %s", cfg.OllamaTimeout)
 	log.Printf("[orchestrator] cache ttl: %s", cfg.CacheTTL)
+	log.Printf("[orchestrator] retry: attempts=%d base=%s max=%s",
+		cfg.RetryMaxAttempts, cfg.RetryBaseBackoff, cfg.RetryMaxBackoff)
 
 	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "orchestrator", "0.5.0")
 	if err != nil {
@@ -99,6 +101,11 @@ func main() {
 		PolicyRepo: policyRepo,
 		BudgetRepo: budgetRepo,
 		Metrics:    mtr,
+		Retry: orchestrator.RetryConfig{
+			MaxAttempts: cfg.RetryMaxAttempts,
+			BaseBackoff: cfg.RetryBaseBackoff,
+			MaxBackoff:  cfg.RetryMaxBackoff,
+		},
 	})
 
 	// gRPC server with tenant + tracing interceptors. The otelgrpc handler
