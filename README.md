@@ -223,12 +223,18 @@ inference-gateway/
 │   ├── jobs/             # Async job state machine, repo, queue facade
 │   ├── messaging/
 │   │   └── natsclient/   # NATS connection wrapper
+│   ├── observability/
+│   │   ├── metrics/      # Prometheus collectors + admin server
+│   │   └── tracing/      # OpenTelemetry init helper
 │   ├── worker/           # Worker subscribe/claim/execute loop + sweeper
 │   └── provider/         # Provider abstraction
 │       └── ollama/       # Ollama provider implementation
+├── deployments/
+│   ├── prometheus/       # Prometheus scrape config
+│   └── grafana/          # Grafana provisioning + dashboards
 ├── proto/
 │   └── inference/v1/     # Protobuf service definition
-├── docker-compose.yml    # Local infrastructure (Ollama, Postgres, Redis, NATS)
+├── docker-compose.yml    # Local infrastructure (Ollama, Postgres, Redis, NATS, Prometheus, Grafana, Jaeger)
 ├── Makefile              # Developer commands
 └── README.md
 ```
@@ -261,13 +267,48 @@ Environment variables with defaults:
 | `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway, Orchestrator, Worker |
 | `REDIS_URL` | `redis://localhost:6379/0` | Gateway, Orchestrator |
 | `NATS_URL` | `nats://localhost:4222` | Gateway, Worker |
+| `OTLP_ENDPOINT` | `localhost:4317` | Gateway, Orchestrator, Worker |
+| `ORCHESTRATOR_ADMIN_PORT` | `9091` | Orchestrator |
 | `CACHE_TTL` | `1h` | Orchestrator |
 | `IDEMPOTENCY_TTL` | `24h` | Gateway |
 | `JOB_TIMEOUT` | `2m` | Worker |
 | `SWEEP_INTERVAL` | `30s` | Worker |
 | `STUCK_JOB_THRESHOLD` | `5m` | Worker |
 
+## Observability
+
+`make up` boots the full observability stack alongside the data plane:
+
+| URL | What |
+|-----|------|
+| `http://localhost:8080/metrics` | Gateway Prometheus metrics |
+| `http://localhost:9091/metrics` | Orchestrator Prometheus metrics |
+| `http://localhost:9094` | Prometheus UI |
+| `http://localhost:3000` | Grafana (anonymous admin login enabled) |
+| `http://localhost:16686` | Jaeger UI |
+
+The pre-provisioned Grafana dashboard ("Inference Gateway") covers the four LLD panels: gateway RPS, P95 inference latency, cache hit ratio, and cost per tenant, plus a provider failure rate panel.
+
+**Key metrics**
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `gateway_http_requests_total` | counter | method, route, status |
+| `gateway_http_request_duration_seconds` | histogram | method, route, status |
+| `inference_latency_seconds` | histogram | tenant, model, provider, status (`ok` / `cached` / `error`) |
+| `cache_hits_total` / `cache_misses_total` | counter | tenant, model |
+| `provider_failures_total` | counter | provider, model |
+| `inference_cost_usd_total` | counter | tenant, model, provider |
+
+Routes are templated to keep cardinality bounded (`/v1/jobs/{id}` rather than the raw UUID). `tenant` is intentionally a label so per-tenant dashboards work; in a real production deployment with thousands of tenants this would need to be hashed or dropped to keep cardinality in check.
+
+**Tracing**
+
+OTLP gRPC traces are exported to Jaeger via `localhost:4317`. The propagation chain produces traces of the form `gateway → orchestrator → cache.lookup → provider.execute` for sync calls and `worker → orchestrator → cache.lookup → provider.execute` for async jobs.
+
 ## Version
+
+`v0.5.0` — Phase 5: Observability. Adds Prometheus metrics on both gateway and orchestrator (admin port `:9091` for the orchestrator, `/metrics` on the gateway HTTP port), Prometheus + Grafana + Jaeger containers in docker-compose with provisioned datasource and dashboard, and OpenTelemetry tracing wired across gateway HTTP, orchestrator gRPC, worker gRPC, and the orchestrator's internal cache and provider seams.
 
 `v0.4.0` — Phase 4: Async pipeline. Adds NATS broker, `jobs` table + state machine (`pending → running → completed|failed`), `POST /v1/inference/execute_async` and `GET /v1/jobs/{id}` endpoints, a standalone worker binary that consumes the queue and reuses the orchestrator's gRPC `ExecuteInference` (so async jobs go through the same routing, cache, budget guard, and usage tracking as sync calls), and a sweeper that times out orphan jobs.
 
