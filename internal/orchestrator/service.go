@@ -37,6 +37,20 @@ type HealthSource interface {
 	IsHealthy(name string) bool
 }
 
+// PolicyReader is the slice of policy.Repository the service needs. Defined
+// here so we can drop in either the direct Postgres repository or a cached
+// wrapper without touching the service.
+type PolicyReader interface {
+	Get(ctx context.Context, tenantID string) (*policy.Policy, error)
+}
+
+// BudgetReader is the slice of budget.Repository the service needs. GetLimits
+// is cache-friendly; MonthToDate must always reflect live usage.
+type BudgetReader interface {
+	GetLimits(ctx context.Context, tenantID string) (*budget.Limits, error)
+	MonthToDate(ctx context.Context, tenantID string) (float64, error)
+}
+
 // Service implements the gRPC InferenceService.
 type Service struct {
 	pb.UnimplementedInferenceServiceServer
@@ -45,8 +59,8 @@ type Service struct {
 	cache      *responsecache.Cache
 	usageRepo  *usage.Repository
 	router     *router.Router
-	policyRepo *policy.Repository
-	budgetRepo *budget.Repository
+	policyRepo PolicyReader
+	budgetRepo BudgetReader
 	metrics    *metrics.Metrics
 	retry      RetryConfig
 	health     HealthSource
@@ -59,8 +73,8 @@ type Deps struct {
 	Cache      *responsecache.Cache
 	UsageRepo  *usage.Repository
 	Router     *router.Router
-	PolicyRepo *policy.Repository
-	BudgetRepo *budget.Repository
+	PolicyRepo PolicyReader
+	BudgetRepo BudgetReader
 	Metrics    *metrics.Metrics
 	Retry      RetryConfig
 	Health     HealthSource

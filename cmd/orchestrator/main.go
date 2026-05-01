@@ -47,6 +47,7 @@ func main() {
 		cfg.RetryMaxAttempts, cfg.RetryBaseBackoff, cfg.RetryMaxBackoff)
 	log.Printf("[orchestrator] health: interval=%s timeout=%s",
 		cfg.HealthInterval, cfg.HealthTimeout)
+	log.Printf("[orchestrator] config cache ttl: %s", cfg.ConfigCacheTTL)
 
 	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "orchestrator", "0.5.0")
 	if err != nil {
@@ -82,8 +83,8 @@ func main() {
 	log.Println("[orchestrator] postgres connected")
 
 	usageRepo := usage.NewRepository(pool)
-	policyRepo := policy.NewRepository(pool)
-	budgetRepo := budget.NewRepository(pool)
+	policyRepo := policy.NewCachedRepository(policy.NewRepository(pool), rdsClient, cfg.ConfigCacheTTL)
+	budgetRepo := budget.NewCachedRepository(budget.NewRepository(pool), rdsClient, cfg.ConfigCacheTTL)
 
 	// Provider registry. Both providers are always available; the router
 	// decides which one to call per request.

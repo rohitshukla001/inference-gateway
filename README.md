@@ -270,6 +270,7 @@ Environment variables with defaults:
 | `RETRY_MAX_BACKOFF` | `2s` | Orchestrator |
 | `HEALTH_INTERVAL` | `15s` | Orchestrator |
 | `HEALTH_TIMEOUT` | `3s` | Orchestrator |
+| `CONFIG_CACHE_TTL` | `5m` | Orchestrator |
 | `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway, Orchestrator, Worker |
 | `REDIS_URL` | `redis://localhost:6379/0` | Gateway, Orchestrator |
 | `NATS_URL` | `nats://localhost:4222` | Gateway, Worker |
