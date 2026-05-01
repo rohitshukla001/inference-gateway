@@ -34,7 +34,7 @@ func main() {
 	log.Printf("[worker] job timeout: %s sweeper: every %s threshold %s",
 		cfg.JobTimeout, cfg.SweepInterval, cfg.StuckJobThreshold)
 
-	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "worker", "0.5.0")
+	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "worker", "0.6.0")
 	if err != nil {
 		log.Printf("[worker] tracing init failed (continuing without): %v", err)
 		traceShutdown = func(context.Context) error { return nil }

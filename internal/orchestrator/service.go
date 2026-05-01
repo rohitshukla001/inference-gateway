@@ -27,7 +27,7 @@ import (
 
 var tracer = otel.Tracer("orchestrator")
 
-const serviceVersion = "0.5.0"
+const serviceVersion = "0.6.0"
 
 // HealthSource reports whether a provider is currently considered healthy.
 // The orchestrator uses it to skip a known-bad primary and go straight to

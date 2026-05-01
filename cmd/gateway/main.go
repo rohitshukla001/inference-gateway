@@ -38,7 +38,7 @@ func main() {
 	log.Printf("[gateway] connecting to orchestrator at %s", cfg.OrchestratorGRPCAddr)
 	log.Printf("[gateway] idempotency ttl: %s", cfg.IdempotencyTTL)
 
-	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "gateway", "0.5.0")
+	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "gateway", "0.6.0")
 	if err != nil {
 		log.Printf("[gateway] tracing init failed (continuing without): %v", err)
 		traceShutdown = func(context.Context) error { return nil }

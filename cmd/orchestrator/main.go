@@ -49,7 +49,7 @@ func main() {
 		cfg.HealthInterval, cfg.HealthTimeout)
 	log.Printf("[orchestrator] config cache ttl: %s", cfg.ConfigCacheTTL)
 
-	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "orchestrator", "0.5.0")
+	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "orchestrator", "0.6.0")
 	if err != nil {
 		log.Printf("[orchestrator] tracing init failed (continuing without): %v", err)
 		traceShutdown = func(context.Context) error { return nil }

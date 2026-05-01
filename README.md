@@ -230,8 +230,10 @@ inference-gateway/
 │   ├── observability/
 │   │   ├── metrics/      # Prometheus collectors + admin server
 │   │   └── tracing/      # OpenTelemetry init helper
+│   ├── ratelimit/        # Per-tenant Redis fixed-window limiter
 │   ├── worker/           # Worker subscribe/claim/execute loop + sweeper
 │   └── provider/         # Provider abstraction
+│       ├── health/       # Periodic provider health checker
 │       └── ollama/       # Ollama provider implementation
 ├── deployments/
 │   ├── prometheus/       # Prometheus scrape config
@@ -319,6 +321,8 @@ Routes are templated to keep cardinality bounded (`/v1/jobs/{id}` rather than th
 OTLP gRPC traces are exported to Jaeger via `localhost:4317`. The propagation chain produces traces of the form `gateway → orchestrator → cache.lookup → provider.execute` for sync calls and `worker → orchestrator → cache.lookup → provider.execute` for async jobs.
 
 ## Version
+
+`v0.6.0` — Phase 6: Production hardening. Adds configurable Ollama HTTP timeout, exponential-backoff retries with full jitter on every provider call (3 attempts by default), a background per-provider health checker that lets the orchestrator skip a known-bad primary and exposes `/health/providers` on the admin port, Redis read-through caching for tenant policies and budget limits (`CONFIG_CACHE_TTL`, default 5m), and per-tenant request rate limiting via a Redis fixed-window-per-second counter that returns `429 Too Many Requests` with a `Retry-After` header. New table `tenant_rate_limits`; the dev tenant is seeded at 60 rps.
 
 `v0.5.0` — Phase 5: Observability. Adds Prometheus metrics on both gateway and orchestrator (admin port `:9091` for the orchestrator, `/metrics` on the gateway HTTP port), Prometheus + Grafana + Jaeger containers in docker-compose with provisioned datasource and dashboard, and OpenTelemetry tracing wired across gateway HTTP, orchestrator gRPC, worker gRPC, and the orchestrator's internal cache and provider seams.
 
