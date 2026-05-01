@@ -52,6 +52,11 @@ message ExecuteInferenceResponse {
 
   // Whether this response was served from cache (true) or freshly generated.
   bool cached = 5;
+
+  // Actual cost (USD) of this call, computed from token counts and the
+  // chosen model's per-1k rates. Zero for cache hits and for local
+  // (Ollama) responses.
+  double cost = 6;
 }
 
 // TokenUsage tracks token consumption for observability and cost tracking.

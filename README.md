@@ -64,7 +64,18 @@ The `dev-key-tenant-acme` key is seeded automatically by migration `003_seed_dev
 
 The gateway uses **API key auth** via `Authorization: Bearer <key>`. Keys are stored as `sha256(key)` in Postgres, never in plaintext. Each key maps to one tenant; the resolved tenant id is propagated to the orchestrator via the gRPC metadata header `x-tenant-id`.
 
-To add more tenants/keys, write SQL into a new migration file under `internal/db/migrations/`. An admin API is planned for Phase 2.
+To add more tenants/keys, write SQL into a new migration file under `internal/db/migrations/`. An admin API is planned for a later phase.
+
+## Routing and budgets
+
+The orchestrator picks a model per request via a rule-based router. The static catalog (`internal/router/catalog.go`) lists each `(provider, model)` along with its tier, per-1k pricing, and p95 latency.
+
+Tenants get two policy tables:
+
+- `tenant_policies` — `allowed_models` (JSONB array) and a `default_tier` (`cheap` / `default` / `premium`). The dev tenant is seeded with all three demo models allowed and tier `default`.
+- `tenant_budgets` — `monthly_limit_usd` and `soft_limit_usd`. The dev tenant has a `$10` monthly cap. Before each non-cached call, the orchestrator sums `usage_records.cost` for the current month and rejects with `402 Payment Required` if `month_to_date + projected_cost > monthly_limit`.
+
+The router always pairs cloud-style providers with a 1-deep fallback to the local Ollama model. If the primary provider fails, the orchestrator transparently retries against Ollama (and tags the usage row with the actual served model).
 
 ## API Reference
 
@@ -76,27 +87,39 @@ Execute an LLM inference request. **Requires `Authorization: Bearer <key>`.**
 ```json
 {
   "prompt": "Explain microservices in one sentence.",
-  "model": "llama3.2",
-  "provider": "ollama"
+  "model": "gpt-4o-mini",
+  "max_cost": 0.01,
+  "latency_sla_ms": 500
 }
 ```
+
+All routing fields are optional:
+
+| Field | Effect |
+|---|---|
+| `model` | Pin a specific model. Must be in the tenant's `allowed_models`; rejected with 403 otherwise. |
+| `max_cost` | Filter the catalog to models whose worst-case projected cost fits the cap. Cheapest survivor wins. |
+| `latency_sla_ms` | Filter the catalog to models whose p95 latency fits the SLA. |
+
+If none are set, the router picks the cheapest model in the tenant's `default_tier`.
 
 **Response:**
 ```json
 {
   "output": "Microservices is an architectural approach...",
-  "model": "llama3.2",
-  "provider": "ollama",
+  "model": "gpt-4o-mini",
+  "provider": "mock",
   "usage": {
     "prompt_tokens": 12,
     "completion_tokens": 45,
     "total_tokens": 57
   },
-  "cached": false
+  "cached": false,
+  "cost": 0.000029
 }
 ```
 
-The `cached` field is `true` when the response was served from the Redis exact-match cache and `false` when it was freshly generated.
+`cached` is `true` when the response was served from the Redis exact-match cache (the cache key includes the chosen model). `cost` is the actual USD cost of this call computed from token counts × per-1k rates from the catalog; `0` for cache hits and for local Ollama responses.
 
 **Optional headers:**
 
@@ -170,6 +193,8 @@ Environment variables with defaults:
 | `IDEMPOTENCY_TTL` | `24h` | Gateway |
 
 ## Version
+
+`v0.3.0` — Phase 3: Smart routing across multiple providers (Ollama + mock OpenAI-style) driven by tenant policy, request `max_cost`, and `latency_sla_ms`. Adds `tenant_policies` and `tenant_budgets` tables, a budget guard that rejects with `402 Payment Required` when month-to-date spend would exceed the cap, and a 1-deep Ollama fallback for primary failures. Response now carries `cost`.
 
 `v0.2.0` — Phase 2: Adds Redis exact-match response cache, `Idempotency-Key` middleware, and per-request usage tracking written to Postgres (`usage_records`).
 

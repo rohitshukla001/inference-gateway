@@ -9,6 +9,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/rshuklas/inference-gateway/internal/budget"
 	"github.com/rshuklas/inference-gateway/internal/cache/responsecache"
 	"github.com/rshuklas/inference-gateway/internal/policy"
 	"github.com/rshuklas/inference-gateway/internal/provider"
@@ -31,6 +32,7 @@ type Service struct {
 	usageRepo  *usage.Repository
 	router     *router.Router
 	policyRepo *policy.Repository
+	budgetRepo *budget.Repository
 }
 
 // Deps groups the runtime dependencies the service needs. Using a struct
@@ -41,6 +43,7 @@ type Deps struct {
 	UsageRepo  *usage.Repository
 	Router     *router.Router
 	PolicyRepo *policy.Repository
+	BudgetRepo *budget.Repository
 }
 
 // NewService constructs the orchestrator with its dependencies. Providers must
@@ -52,6 +55,7 @@ func NewService(d Deps) *Service {
 		usageRepo:  d.UsageRepo,
 		router:     d.Router,
 		policyRepo: d.PolicyRepo,
+		budgetRepo: d.BudgetRepo,
 	}
 }
 
@@ -124,6 +128,12 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 
 	log.Printf("[orchestrator] cache MISS | tenant=%s model=%s", t.ID, decision.Primary.Model)
 
+	// Budget gate. Cache hits short-circuit above so they bypass this; the
+	// gate only protects calls that will actually hit a paid provider.
+	if err := s.checkBudget(ctx, t.ID, decision.Primary, req.GetPrompt()); err != nil {
+		return nil, err
+	}
+
 	// Primary attempt. On error, fall back if available.
 	served, result, err := s.executeWithFallback(ctx, decision, req.GetPrompt())
 	if err != nil {
@@ -165,7 +175,56 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 			TotalTokens:      result.TotalTokens,
 		},
 		Cached: false,
+		Cost:   cost,
 	}, nil
+}
+
+// checkBudget rejects with ResourceExhausted if the projected cost of this
+// call would push month-to-date spend past the tenant's monthly limit.
+// Tenants without a budget row pass through unchecked.
+func (s *Service) checkBudget(
+	ctx context.Context,
+	tenantID string,
+	primary router.ModelEntry,
+	prompt string,
+) error {
+	if s.budgetRepo == nil {
+		return nil
+	}
+	limits, err := s.budgetRepo.GetLimits(ctx, tenantID)
+	if err != nil {
+		if errors.Is(err, budget.ErrNotFound) {
+			return nil
+		}
+		log.Printf("[orchestrator] budget lookup failed (allowing call): %v", err)
+		return nil
+	}
+	// A zero monthly limit means "unlimited" so dev tenants pre-Phase 3 still
+	// work without surprise rejections.
+	if limits.MonthlyLimitUSD <= 0 {
+		return nil
+	}
+
+	projected := router.EstimateCost(prompt, primary.Pricing)
+	mtd, err := s.budgetRepo.MonthToDate(ctx, tenantID)
+	if err != nil {
+		log.Printf("[orchestrator] month-to-date lookup failed (allowing call): %v", err)
+		return nil
+	}
+
+	if mtd+projected > limits.MonthlyLimitUSD {
+		log.Printf("[orchestrator] budget BLOCK | tenant=%s mtd=%.4f projected=%.4f limit=%.4f",
+			tenantID, mtd, projected, limits.MonthlyLimitUSD)
+		return status.Errorf(codes.ResourceExhausted,
+			"monthly budget exceeded: spent $%.4f of $%.2f, projected $%.4f more",
+			mtd, limits.MonthlyLimitUSD, projected)
+	}
+
+	if limits.SoftLimitUSD > 0 && mtd+projected > limits.SoftLimitUSD {
+		log.Printf("[orchestrator] budget WARN | tenant=%s mtd=%.4f projected=%.4f soft=%.4f",
+			tenantID, mtd, projected, limits.SoftLimitUSD)
+	}
+	return nil
 }
 
 // executeWithFallback runs decision.Primary, then decision.Fallback if the

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rshuklas/inference-gateway/internal/budget"
 	"github.com/rshuklas/inference-gateway/internal/cache/responsecache"
 	"github.com/rshuklas/inference-gateway/internal/config"
 	"github.com/rshuklas/inference-gateway/internal/db"
@@ -61,6 +62,7 @@ func main() {
 
 	usageRepo := usage.NewRepository(pool)
 	policyRepo := policy.NewRepository(pool)
+	budgetRepo := budget.NewRepository(pool)
 
 	// Provider registry. Both providers are always available; the router
 	// decides which one to call per request.
@@ -78,6 +80,7 @@ func main() {
 		UsageRepo:  usageRepo,
 		Router:     rtr,
 		PolicyRepo: policyRepo,
+		BudgetRepo: budgetRepo,
 	})
 
 	// gRPC server with tenant interceptor.

@@ -120,7 +120,11 @@ type ExecuteInferenceResponse struct {
 	// Token usage metadata.
 	Usage *TokenUsage `protobuf:"bytes,4,opt,name=usage,proto3" json:"usage,omitempty"`
 	// Whether this response was served from cache (true) or freshly generated.
-	Cached        bool `protobuf:"varint,5,opt,name=cached,proto3" json:"cached,omitempty"`
+	Cached bool `protobuf:"varint,5,opt,name=cached,proto3" json:"cached,omitempty"`
+	// Actual cost (USD) of this call, computed from token counts and the
+	// chosen model's per-1k rates. Zero for cache hits and for local
+	// (Ollama) responses.
+	Cost          float64 `protobuf:"fixed64,6,opt,name=cost,proto3" json:"cost,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -188,6 +192,13 @@ func (x *ExecuteInferenceResponse) GetCached() bool {
 		return x.Cached
 	}
 	return false
+}
+
+func (x *ExecuteInferenceResponse) GetCost() float64 {
+	if x != nil {
+		return x.Cost
+	}
+	return 0
 }
 
 // TokenUsage tracks token consumption for observability and cost tracking.
@@ -357,13 +368,14 @@ const file_inference_v1_inference_proto_rawDesc = "" +
 	"\x05model\x18\x02 \x01(\tR\x05model\x12\x1a\n" +
 	"\bprovider\x18\x03 \x01(\tR\bprovider\x12\x19\n" +
 	"\bmax_cost\x18\x04 \x01(\x01R\amaxCost\x12$\n" +
-	"\x0elatency_sla_ms\x18\x05 \x01(\x05R\flatencySlaMs\"\xac\x01\n" +
+	"\x0elatency_sla_ms\x18\x05 \x01(\x05R\flatencySlaMs\"\xc0\x01\n" +
 	"\x18ExecuteInferenceResponse\x12\x16\n" +
 	"\x06output\x18\x01 \x01(\tR\x06output\x12\x14\n" +
 	"\x05model\x18\x02 \x01(\tR\x05model\x12\x1a\n" +
 	"\bprovider\x18\x03 \x01(\tR\bprovider\x12.\n" +
 	"\x05usage\x18\x04 \x01(\v2\x18.inference.v1.TokenUsageR\x05usage\x12\x16\n" +
-	"\x06cached\x18\x05 \x01(\bR\x06cached\"\x81\x01\n" +
+	"\x06cached\x18\x05 \x01(\bR\x06cached\x12\x12\n" +
+	"\x04cost\x18\x06 \x01(\x01R\x04cost\"\x81\x01\n" +
 	"\n" +
 	"TokenUsage\x12#\n" +
 	"\rprompt_tokens\x18\x01 \x01(\x05R\fpromptTokens\x12+\n" +
