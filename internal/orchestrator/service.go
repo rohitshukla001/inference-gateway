@@ -21,7 +21,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const serviceVersion = "0.3.0"
+const serviceVersion = "0.4.0"
 
 // Service implements the gRPC InferenceService.
 type Service struct {

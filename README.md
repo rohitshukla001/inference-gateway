@@ -5,17 +5,21 @@ A centralized Go microservice that acts as a unified gateway for LLM inference c
 ## Architecture
 
 ```
-┌──────────┐       HTTP        ┌──────────────┐       gRPC       ┌──────────────┐
-│  Client   │ ───────────────▶ │   Gateway    │ ──────────────▶  │ Orchestrator │
-│ (curl)    │ ◀─────────────── │  (:8080)     │ ◀──────────────  │   (:9090)    │
-└──────────┘       JSON        └──────────────┘                  └──────┬───────┘
-                                                                        │
-                                                                        │ HTTP
-                                                                        ▼
-                                                                  ┌──────────┐
-                                                                  │  Ollama  │
-                                                                  │ (:11434) │
-                                                                  └──────────┘
+┌──────────┐  HTTP   ┌──────────────┐   gRPC    ┌──────────────┐   HTTP   ┌──────────┐
+│  Client  │ ──────▶│   Gateway    │ ────────▶ │ Orchestrator │ ───────▶ │  Ollama  │
+│  (curl)  │ ◀──────│  (:8080)     │ ◀──────── │   (:9090)    │ ◀─────── │ (:11434) │
+└──────────┘  JSON   └──┬────────┬──┘           └──────▲───────┘          └──────────┘
+                        │        │ async               │ gRPC
+                        │        ▼                     │
+                        │     ┌──────┐    NATS    ┌────┴─────┐
+                        │     │ NATS │───────────▶│  Worker  │
+                        │     │ :4222│            │          │
+                        │     └──────┘            └──────────┘
+                        ▼
+                    ┌─────────┐
+                    │Postgres │  (jobs, tenants, usage, policies, budgets)
+                    │  :5432  │
+                    └─────────┘
 ```
 
 ## Quick Start (3 Steps)
@@ -43,6 +47,9 @@ make run-orchestrator
 
 # Terminal 2
 make run-gateway
+
+# Terminal 3 (only needed for the async path)
+make run-worker
 ```
 
 ### 3. Test It
@@ -127,6 +134,64 @@ If none are set, the router picks the cheapest model in the tenant's `default_ti
 |---|---|
 | `Idempotency-Key: <any-string>` | Within `IDEMPOTENCY_TTL` (default 24h), repeated calls with the same key + tenant return the original response verbatim. The replay carries `Idempotent-Replay: true`. |
 
+### `POST /v1/inference/execute_async`
+
+Submit an inference request for asynchronous execution. The body is identical to `/v1/inference/execute`. The gateway persists a pending job, publishes it to NATS for the worker to pick up, and returns immediately.
+
+**Response:** `202 Accepted`
+```json
+{
+  "job_id": "9b2f3c50-...",
+  "status": "pending"
+}
+```
+
+### `GET /v1/jobs/{job_id}`
+
+Poll the state of an async job. The job is scoped to the calling tenant; requesting another tenant's job returns `404`.
+
+**Response (pending or running):**
+```json
+{
+  "job_id": "9b2f3c50-...",
+  "status": "running",
+  "created_at": "2026-05-01T18:32:11Z",
+  "started_at": "2026-05-01T18:32:12Z"
+}
+```
+
+**Response (completed):**
+```json
+{
+  "job_id": "9b2f3c50-...",
+  "status": "completed",
+  "created_at": "2026-05-01T18:32:11Z",
+  "started_at": "2026-05-01T18:32:12Z",
+  "completed_at": "2026-05-01T18:32:14Z",
+  "result": {
+    "output": "...",
+    "model": "gpt-4o-mini",
+    "provider": "mock",
+    "usage": { "prompt_tokens": 12, "completion_tokens": 45, "total_tokens": 57 },
+    "cached": false,
+    "cost": 0.000029
+  }
+}
+```
+
+**Response (failed):**
+```json
+{
+  "job_id": "9b2f3c50-...",
+  "status": "failed",
+  "created_at": "2026-05-01T18:32:11Z",
+  "completed_at": "2026-05-01T18:32:14Z",
+  "error": "rpc error: code = ResourceExhausted desc = monthly budget exceeded..."
+}
+```
+
+A worker that dies mid-job leaves the row in `running`. The sweeper inside the worker process flips orphan rows to `failed` after `STUCK_JOB_THRESHOLD` (default 5m) so polling clients eventually see closure.
+
 ### `GET /health`
 
 Health check for gateway and orchestrator.
@@ -149,16 +214,21 @@ Health check for gateway and orchestrator.
 inference-gateway/
 ├── cmd/
 │   ├── gateway/          # HTTP entry point
-│   └── orchestrator/     # gRPC service
+│   ├── orchestrator/     # gRPC service
+│   └── worker/           # Async job consumer
 ├── internal/
 │   ├── config/           # Environment-based configuration
 │   ├── gateway/          # HTTP handlers + REST → gRPC translation
 │   ├── orchestrator/     # gRPC service implementation
+│   ├── jobs/             # Async job state machine, repo, queue facade
+│   ├── messaging/
+│   │   └── natsclient/   # NATS connection wrapper
+│   ├── worker/           # Worker subscribe/claim/execute loop + sweeper
 │   └── provider/         # Provider abstraction
 │       └── ollama/       # Ollama provider implementation
 ├── proto/
 │   └── inference/v1/     # Protobuf service definition
-├── docker-compose.yml    # Local infrastructure (Ollama, Postgres, Redis)
+├── docker-compose.yml    # Local infrastructure (Ollama, Postgres, Redis, NATS)
 ├── Makefile              # Developer commands
 └── README.md
 ```
@@ -169,6 +239,7 @@ inference-gateway/
 |---------|-------------|
 | `make run-gateway` | Start gateway HTTP server (:8080) |
 | `make run-orchestrator` | Start orchestrator gRPC server (:9090) |
+| `make run-worker` | Start async job worker |
 | `make proto` | Generate Go code from proto definitions |
 | `make up` | Start infrastructure containers |
 | `make down` | Stop infrastructure containers |
@@ -187,12 +258,18 @@ Environment variables with defaults:
 | `ORCHESTRATOR_GRPC_PORT` | `9090` | Orchestrator |
 | `OLLAMA_ENDPOINT` | `http://localhost:11434` | Orchestrator |
 | `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Orchestrator |
-| `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway, Orchestrator |
+| `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway, Orchestrator, Worker |
 | `REDIS_URL` | `redis://localhost:6379/0` | Gateway, Orchestrator |
+| `NATS_URL` | `nats://localhost:4222` | Gateway, Worker |
 | `CACHE_TTL` | `1h` | Orchestrator |
 | `IDEMPOTENCY_TTL` | `24h` | Gateway |
+| `JOB_TIMEOUT` | `2m` | Worker |
+| `SWEEP_INTERVAL` | `30s` | Worker |
+| `STUCK_JOB_THRESHOLD` | `5m` | Worker |
 
 ## Version
+
+`v0.4.0` — Phase 4: Async pipeline. Adds NATS broker, `jobs` table + state machine (`pending → running → completed|failed`), `POST /v1/inference/execute_async` and `GET /v1/jobs/{id}` endpoints, a standalone worker binary that consumes the queue and reuses the orchestrator's gRPC `ExecuteInference` (so async jobs go through the same routing, cache, budget guard, and usage tracking as sync calls), and a sweeper that times out orphan jobs.
 
 `v0.3.0` — Phase 3: Smart routing across multiple providers (Ollama + mock OpenAI-style) driven by tenant policy, request `max_cost`, and `latency_sla_ms`. Adds `tenant_policies` and `tenant_budgets` tables, a budget guard that rejects with `402 Payment Required` when month-to-date spend would exceed the cap, and a 1-deep Ollama fallback for primary failures. Response now carries `cost`.
 
