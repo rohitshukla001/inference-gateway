@@ -103,6 +103,13 @@ func (o *OllamaProvider) Execute(ctx context.Context, req *provider.InferenceReq
 	}, nil
 }
 
+// Pricing returns zero rates for any model. Ollama runs locally so there is
+// no per-token cost. This still needs to be implemented to satisfy the
+// Provider interface and to keep cost math uniform across providers.
+func (o *OllamaProvider) Pricing(_ string) (provider.Pricing, bool) {
+	return provider.Pricing{}, true
+}
+
 // HealthCheck verifies that Ollama is reachable.
 func (o *OllamaProvider) HealthCheck(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.endpoint+"/api/tags", nil)

@@ -35,6 +35,10 @@ func (s *stubProvider) Execute(_ context.Context, _ *provider.InferenceRequest) 
 
 func (s *stubProvider) HealthCheck(_ context.Context) error { return nil }
 
+func (s *stubProvider) Pricing(_ string) (provider.Pricing, bool) {
+	return provider.Pricing{}, true
+}
+
 func TestExecuteInference_RejectsEmptyPrompt(t *testing.T) {
 	p := &stubProvider{name: "stub"}
 	svc := NewService(p, nil, nil)
