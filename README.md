@@ -48,20 +48,29 @@ make run-gateway
 ### 3. Test It
 
 ```bash
-# Health check
+# Health check (no auth)
 curl http://localhost:8080/health
 
-# Execute inference
+# Execute inference (requires Bearer API key)
 curl -X POST http://localhost:8080/v1/inference/execute \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer dev-key-tenant-acme" \
   -d '{"prompt": "Say hello in one sentence."}'
 ```
+
+The `dev-key-tenant-acme` key is seeded automatically by migration `003_seed_dev_tenant.up.sql` for local use.
+
+## Authentication
+
+The gateway uses **API key auth** via `Authorization: Bearer <key>`. Keys are stored as `sha256(key)` in Postgres, never in plaintext. Each key maps to one tenant; the resolved tenant id is propagated to the orchestrator via the gRPC metadata header `x-tenant-id`.
+
+To add more tenants/keys, write SQL into a new migration file under `internal/db/migrations/`. An admin API is planned for Phase 2.
 
 ## API Reference
 
 ### `POST /v1/inference/execute`
 
-Execute an LLM inference request.
+Execute an LLM inference request. **Requires `Authorization: Bearer <key>`.**
 
 **Request:**
 ```json
@@ -146,6 +155,7 @@ Environment variables with defaults:
 | `ORCHESTRATOR_GRPC_PORT` | `9090` | Orchestrator |
 | `OLLAMA_ENDPOINT` | `http://localhost:11434` | Orchestrator |
 | `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Orchestrator |
+| `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway |
 
 ## Version
 

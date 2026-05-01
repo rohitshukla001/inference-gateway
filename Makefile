@@ -61,6 +61,7 @@ test-e2e:
 	@echo "==> Executing inference..."
 	curl -s -X POST http://localhost:8080/v1/inference/execute \
 		-H "Content-Type: application/json" \
+		-H "Authorization: Bearer dev-key-tenant-acme" \
 		-d '{"prompt": "Say hello in one sentence."}' | jq .
 
 # ---- Utilities ----

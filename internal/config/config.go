@@ -9,6 +9,7 @@ import (
 type GatewayConfig struct {
 	HTTPPort             string // Port for HTTP server (default: 8080)
 	OrchestratorGRPCAddr string // Address of orchestrator gRPC server (default: localhost:9090)
+	PostgresURL          string // Postgres DSN for tenant + api_key lookup
 }
 
 // OrchestratorConfig holds configuration for the orchestrator service.
@@ -23,6 +24,7 @@ func LoadGatewayConfig() *GatewayConfig {
 	return &GatewayConfig{
 		HTTPPort:             getEnv("GATEWAY_HTTP_PORT", "8080"),
 		OrchestratorGRPCAddr: getEnv("ORCHESTRATOR_GRPC_ADDR", "localhost:9090"),
+		PostgresURL:          getEnv("POSTGRES_URL", "postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable"),
 	}
 }
 
