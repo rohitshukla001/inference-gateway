@@ -10,6 +10,8 @@ import (
 	"time"
 
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Handler holds the HTTP handlers for the gateway API.
@@ -28,9 +30,11 @@ func NewHandler(client pb.InferenceServiceClient) *Handler {
 
 // ExecuteRequest is the JSON body for POST /v1/inference/execute.
 type ExecuteRequest struct {
-	Prompt   string `json:"prompt"`
-	Model    string `json:"model,omitempty"`
-	Provider string `json:"provider,omitempty"`
+	Prompt       string  `json:"prompt"`
+	Model        string  `json:"model,omitempty"`
+	Provider     string  `json:"provider,omitempty"`
+	MaxCost      float64 `json:"max_cost,omitempty"`
+	LatencySLAMs int32   `json:"latency_sla_ms,omitempty"`
 }
 
 // ExecuteResponse is the JSON response for inference execution.
@@ -94,13 +98,16 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	grpcResp, err := h.orchestratorClient.ExecuteInference(ctx, &pb.ExecuteInferenceRequest{
-		Prompt:   req.Prompt,
-		Model:    req.Model,
-		Provider: req.Provider,
+		Prompt:       req.Prompt,
+		Model:        req.Model,
+		Provider:     req.Provider,
+		MaxCost:      req.MaxCost,
+		LatencySlaMs: req.LatencySLAMs,
 	})
 	if err != nil {
 		log.Printf("[gateway] orchestrator error: %v", err)
-		writeError(w, http.StatusBadGateway, "inference execution failed")
+		code, msg := mapGRPCError(err)
+		writeError(w, code, msg)
 		return
 	}
 
@@ -161,4 +168,27 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 
 func writeError(w http.ResponseWriter, code int, message string) {
 	writeJSON(w, code, ErrorResponse{Error: message, Code: code})
+}
+
+// mapGRPCError translates an upstream gRPC error into an HTTP status + a
+// safe message. The orchestrator's status.Error contracts define the
+// mapping; unknown codes default to 502 Bad Gateway.
+func mapGRPCError(err error) (int, string) {
+	st, ok := status.FromError(err)
+	if !ok {
+		return http.StatusBadGateway, "inference execution failed"
+	}
+	switch st.Code() {
+	case codes.InvalidArgument:
+		return http.StatusBadRequest, st.Message()
+	case codes.Unauthenticated:
+		return http.StatusUnauthorized, st.Message()
+	case codes.PermissionDenied:
+		return http.StatusForbidden, st.Message()
+	case codes.ResourceExhausted:
+		// Reserved for the Phase 3 budget guard.
+		return http.StatusPaymentRequired, st.Message()
+	default:
+		return http.StatusBadGateway, "inference execution failed"
+	}
 }

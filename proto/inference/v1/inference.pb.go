@@ -21,17 +21,24 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// ExecuteInferenceRequest carries the prompt and optional model configuration.
+// ExecuteInferenceRequest carries the prompt and optional routing hints.
 type ExecuteInferenceRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The input prompt to send to the LLM provider.
 	Prompt string `protobuf:"bytes,1,opt,name=prompt,proto3" json:"prompt,omitempty"`
-	// Optional: model name override (e.g., "llama3.2", "mistral").
-	// If empty, the orchestrator uses its default model.
+	// Optional: model name override (e.g., "llama3.2", "gpt-4o-mini").
+	// If empty, the router picks based on tenant policy + hints.
 	Model string `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
 	// Optional: provider name override (e.g., "ollama").
-	// If empty, the orchestrator uses its default provider.
-	Provider      string `protobuf:"bytes,3,opt,name=provider,proto3" json:"provider,omitempty"`
+	// Currently unused for routing; reserved for direct-pin scenarios.
+	Provider string `protobuf:"bytes,3,opt,name=provider,proto3" json:"provider,omitempty"`
+	// Optional: maximum cost (USD) the caller will spend on this request.
+	// The router prefers cheaper models when this is set; the budget guard
+	// additionally rejects if the projected cost exceeds the cap.
+	MaxCost float64 `protobuf:"fixed64,4,opt,name=max_cost,json=maxCost,proto3" json:"max_cost,omitempty"`
+	// Optional: latency SLA in milliseconds. The router prefers models whose
+	// p95 latency fits within this budget.
+	LatencySlaMs  int32 `protobuf:"varint,5,opt,name=latency_sla_ms,json=latencySlaMs,proto3" json:"latency_sla_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -85,6 +92,20 @@ func (x *ExecuteInferenceRequest) GetProvider() string {
 		return x.Provider
 	}
 	return ""
+}
+
+func (x *ExecuteInferenceRequest) GetMaxCost() float64 {
+	if x != nil {
+		return x.MaxCost
+	}
+	return 0
+}
+
+func (x *ExecuteInferenceRequest) GetLatencySlaMs() int32 {
+	if x != nil {
+		return x.LatencySlaMs
+	}
+	return 0
 }
 
 // ExecuteInferenceResponse carries the LLM output back to the gateway.
@@ -330,11 +351,13 @@ var File_inference_v1_inference_proto protoreflect.FileDescriptor
 
 const file_inference_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1cinference/v1/inference.proto\x12\finference.v1\"c\n" +
+	"\x1cinference/v1/inference.proto\x12\finference.v1\"\xa4\x01\n" +
 	"\x17ExecuteInferenceRequest\x12\x16\n" +
 	"\x06prompt\x18\x01 \x01(\tR\x06prompt\x12\x14\n" +
 	"\x05model\x18\x02 \x01(\tR\x05model\x12\x1a\n" +
-	"\bprovider\x18\x03 \x01(\tR\bprovider\"\xac\x01\n" +
+	"\bprovider\x18\x03 \x01(\tR\bprovider\x12\x19\n" +
+	"\bmax_cost\x18\x04 \x01(\x01R\amaxCost\x12$\n" +
+	"\x0elatency_sla_ms\x18\x05 \x01(\x05R\flatencySlaMs\"\xac\x01\n" +
 	"\x18ExecuteInferenceResponse\x12\x16\n" +
 	"\x06output\x18\x01 \x01(\tR\x06output\x12\x14\n" +
 	"\x05model\x18\x02 \x01(\tR\x05model\x12\x1a\n" +

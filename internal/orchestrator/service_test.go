@@ -7,15 +7,14 @@ import (
 	"testing"
 
 	"github.com/rshuklas/inference-gateway/internal/provider"
+	"github.com/rshuklas/inference-gateway/internal/router"
 	"github.com/rshuklas/inference-gateway/internal/tenant"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
 )
 
-// Most coverage of cache + usage lives in the live e2e flow because the
-// real types are tightly coupled to redis + pgx. Here we verify the contract
-// the service holds with the provider: tenant required, prompt required,
-// provider invoked exactly once when cache is absent.
-
+// stubProvider is a minimal Provider implementation that the service can
+// register under any name; it implements just enough surface for the
+// orchestrator's flow tests.
 type stubProvider struct {
 	name  string
 	calls int64
@@ -39,9 +38,20 @@ func (s *stubProvider) Pricing(_ string) (provider.Pricing, bool) {
 	return provider.Pricing{}, true
 }
 
+// newTestService wires a Service against a single stub provider registered
+// under whichever provider name the catalog will route to. The router is
+// pinned to the default catalog so the routing path is exercised end-to-end.
+func newTestService(t *testing.T, p *stubProvider, registerAs string) *Service {
+	t.Helper()
+	return NewService(Deps{
+		Providers: map[string]provider.Provider{registerAs: p},
+		Router:    router.New(router.DefaultCatalog()),
+	})
+}
+
 func TestExecuteInference_RejectsEmptyPrompt(t *testing.T) {
-	p := &stubProvider{name: "stub"}
-	svc := NewService(p, nil, nil)
+	p := &stubProvider{name: "ollama"}
+	svc := newTestService(t, p, "ollama")
 
 	ctx := tenant.WithTenant(context.Background(), &tenant.Tenant{ID: "tid-1"})
 	_, err := svc.ExecuteInference(ctx, &pb.ExecuteInferenceRequest{Prompt: ""})
@@ -54,8 +64,8 @@ func TestExecuteInference_RejectsEmptyPrompt(t *testing.T) {
 }
 
 func TestExecuteInference_RejectsMissingTenant(t *testing.T) {
-	p := &stubProvider{name: "stub"}
-	svc := NewService(p, nil, nil)
+	p := &stubProvider{name: "ollama"}
+	svc := newTestService(t, p, "ollama")
 
 	_, err := svc.ExecuteInference(context.Background(), &pb.ExecuteInferenceRequest{Prompt: "hi"})
 	if err == nil {
@@ -66,18 +76,22 @@ func TestExecuteInference_RejectsMissingTenant(t *testing.T) {
 	}
 }
 
-func TestExecuteInference_NoCache_CallsProvider(t *testing.T) {
+func TestExecuteInference_RoutesAndCallsProvider(t *testing.T) {
 	p := &stubProvider{
-		name: "stub",
+		name: "ollama",
 		resp: &provider.InferenceResponse{
-			Output: "hello", Model: "m1", Provider: "stub",
+			Output: "hello", Model: "llama3.2", Provider: "ollama",
 			PromptTokens: 5, CompletionTokens: 3, TotalTokens: 8,
 		},
 	}
-	svc := NewService(p, nil, nil)
+	svc := newTestService(t, p, "ollama")
 
 	ctx := tenant.WithTenant(context.Background(), &tenant.Tenant{ID: "tid-1"})
-	resp, err := svc.ExecuteInference(ctx, &pb.ExecuteInferenceRequest{Prompt: "hi"})
+	// Explicit model so the router picks ollama deterministically.
+	resp, err := svc.ExecuteInference(ctx, &pb.ExecuteInferenceRequest{
+		Prompt: "hi",
+		Model:  "llama3.2",
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -86,20 +100,67 @@ func TestExecuteInference_NoCache_CallsProvider(t *testing.T) {
 		t.Errorf("expected output 'hello', got %q", resp.GetOutput())
 	}
 	if resp.GetCached() {
-		t.Error("expected cached=false when no cache configured")
+		t.Error("expected cached=false on a fresh call with no cache configured")
 	}
 	if atomic.LoadInt64(&p.calls) != 1 {
 		t.Errorf("expected exactly 1 provider call, got %d", p.calls)
 	}
 }
 
-func TestExecuteInference_ProviderError_PropagatesInternal(t *testing.T) {
-	p := &stubProvider{name: "stub", err: errors.New("boom")}
-	svc := NewService(p, nil, nil)
+func TestExecuteInference_FallbackTakesOverWhenPrimaryFails(t *testing.T) {
+	primary := &stubProvider{name: "mock", err: errors.New("primary boom")}
+	fallback := &stubProvider{
+		name: "ollama",
+		resp: &provider.InferenceResponse{
+			Output: "fallback-output", Model: "llama3.2", Provider: "ollama",
+			PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+		},
+	}
+	svc := NewService(Deps{
+		Providers: map[string]provider.Provider{
+			"mock":   primary,
+			"ollama": fallback,
+		},
+		Router: router.New(router.DefaultCatalog()),
+	})
 
 	ctx := tenant.WithTenant(context.Background(), &tenant.Tenant{ID: "tid-1"})
-	_, err := svc.ExecuteInference(ctx, &pb.ExecuteInferenceRequest{Prompt: "hi"})
+	// Explicit gpt-4o-mini → primary is mock, fallback is ollama by catalog rules.
+	resp, err := svc.ExecuteInference(ctx, &pb.ExecuteInferenceRequest{
+		Prompt: "hi",
+		Model:  "gpt-4o-mini",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.GetOutput() != "fallback-output" {
+		t.Errorf("expected fallback output, got %q", resp.GetOutput())
+	}
+	if atomic.LoadInt64(&primary.calls) != 1 {
+		t.Errorf("expected 1 primary call, got %d", primary.calls)
+	}
+	if atomic.LoadInt64(&fallback.calls) != 1 {
+		t.Errorf("expected 1 fallback call, got %d", fallback.calls)
+	}
+}
+
+func TestExecuteInference_BothFail_ReturnsInternal(t *testing.T) {
+	primary := &stubProvider{name: "mock", err: errors.New("primary boom")}
+	fallback := &stubProvider{name: "ollama", err: errors.New("fallback boom too")}
+	svc := NewService(Deps{
+		Providers: map[string]provider.Provider{
+			"mock":   primary,
+			"ollama": fallback,
+		},
+		Router: router.New(router.DefaultCatalog()),
+	})
+
+	ctx := tenant.WithTenant(context.Background(), &tenant.Tenant{ID: "tid-1"})
+	_, err := svc.ExecuteInference(ctx, &pb.ExecuteInferenceRequest{
+		Prompt: "hi",
+		Model:  "gpt-4o-mini",
+	})
 	if err == nil {
-		t.Fatal("expected error when provider fails")
+		t.Fatal("expected error when both primary and fallback fail")
 	}
 }

@@ -17,8 +17,12 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/db"
 	"github.com/rshuklas/inference-gateway/internal/orchestrator"
 	"github.com/rshuklas/inference-gateway/internal/orchestrator/grpcserver"
+	"github.com/rshuklas/inference-gateway/internal/policy"
+	"github.com/rshuklas/inference-gateway/internal/provider"
+	"github.com/rshuklas/inference-gateway/internal/provider/mock"
 	"github.com/rshuklas/inference-gateway/internal/provider/ollama"
 	igredis "github.com/rshuklas/inference-gateway/internal/redis"
+	"github.com/rshuklas/inference-gateway/internal/router"
 	"github.com/rshuklas/inference-gateway/internal/usage"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
 	"google.golang.org/grpc"
@@ -33,10 +37,9 @@ func main() {
 	log.Printf("[orchestrator] default model: %s", cfg.DefaultModel)
 	log.Printf("[orchestrator] cache ttl: %s", cfg.CacheTTL)
 
-	// Redis for response cache.
+	// Redis (response cache).
 	rdsCtx, rdsCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer rdsCancel()
-
 	rdsClient, err := igredis.Connect(rdsCtx, cfg.RedisURL)
 	if err != nil {
 		log.Fatalf("[orchestrator] redis connect failed: %v", err)
@@ -46,11 +49,9 @@ func main() {
 
 	cache := responsecache.New(rdsClient, cfg.CacheTTL)
 
-	// Postgres for usage tracking. Migrations are owned by the gateway boot;
-	// orchestrator only opens a pool for writes.
+	// Postgres (usage + policy).
 	pgCtx, pgCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer pgCancel()
-
 	pool, err := db.Connect(pgCtx, cfg.PostgresURL)
 	if err != nil {
 		log.Fatalf("[orchestrator] postgres connect failed: %v", err)
@@ -59,12 +60,27 @@ func main() {
 	log.Println("[orchestrator] postgres connected")
 
 	usageRepo := usage.NewRepository(pool)
+	policyRepo := policy.NewRepository(pool)
 
-	// Provider + service.
-	ollamaProvider := ollama.New(cfg.OllamaEndpoint, cfg.DefaultModel)
-	svc := orchestrator.NewService(ollamaProvider, cache, usageRepo)
+	// Provider registry. Both providers are always available; the router
+	// decides which one to call per request.
+	providers := map[string]provider.Provider{
+		"ollama": ollama.New(cfg.OllamaEndpoint, cfg.DefaultModel),
+		"mock":   mock.New(),
+	}
+	log.Printf("[orchestrator] providers registered: %v", providerNames(providers))
 
-	// gRPC server with tenant-extracting interceptor.
+	rtr := router.New(router.DefaultCatalog())
+
+	svc := orchestrator.NewService(orchestrator.Deps{
+		Providers:  providers,
+		Cache:      cache,
+		UsageRepo:  usageRepo,
+		Router:     rtr,
+		PolicyRepo: policyRepo,
+	})
+
+	// gRPC server with tenant interceptor.
 	grpcServer := grpc.NewServer(
 		grpc.UnaryInterceptor(grpcserver.TenantUnaryInterceptor()),
 	)
@@ -89,6 +105,13 @@ func main() {
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("[orchestrator] server error: %v", err)
 	}
-
 	log.Println("[orchestrator] stopped")
+}
+
+func providerNames(m map[string]provider.Provider) []string {
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	return names
 }

@@ -13,18 +13,27 @@ service InferenceService {
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 }
 
-// ExecuteInferenceRequest carries the prompt and optional model configuration.
+// ExecuteInferenceRequest carries the prompt and optional routing hints.
 message ExecuteInferenceRequest {
   // The input prompt to send to the LLM provider.
   string prompt = 1;
 
-  // Optional: model name override (e.g., "llama3.2", "mistral").
-  // If empty, the orchestrator uses its default model.
+  // Optional: model name override (e.g., "llama3.2", "gpt-4o-mini").
+  // If empty, the router picks based on tenant policy + hints.
   string model = 2;
 
   // Optional: provider name override (e.g., "ollama").
-  // If empty, the orchestrator uses its default provider.
+  // Currently unused for routing; reserved for direct-pin scenarios.
   string provider = 3;
+
+  // Optional: maximum cost (USD) the caller will spend on this request.
+  // The router prefers cheaper models when this is set; the budget guard
+  // additionally rejects if the projected cost exceeds the cap.
+  double max_cost = 4;
+
+  // Optional: latency SLA in milliseconds. The router prefers models whose
+  // p95 latency fits within this budget.
+  int32 latency_sla_ms = 5;
 }
 
 // ExecuteInferenceResponse carries the LLM output back to the gateway.
