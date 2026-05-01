@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/orchestrator/grpcserver"
 	"github.com/rshuklas/inference-gateway/internal/policy"
 	"github.com/rshuklas/inference-gateway/internal/provider"
+	"github.com/rshuklas/inference-gateway/internal/provider/health"
 	"github.com/rshuklas/inference-gateway/internal/provider/mock"
 	"github.com/rshuklas/inference-gateway/internal/provider/ollama"
 	igredis "github.com/rshuklas/inference-gateway/internal/redis"
@@ -43,6 +45,8 @@ func main() {
 	log.Printf("[orchestrator] cache ttl: %s", cfg.CacheTTL)
 	log.Printf("[orchestrator] retry: attempts=%d base=%s max=%s",
 		cfg.RetryMaxAttempts, cfg.RetryBaseBackoff, cfg.RetryMaxBackoff)
+	log.Printf("[orchestrator] health: interval=%s timeout=%s",
+		cfg.HealthInterval, cfg.HealthTimeout)
 
 	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "orchestrator", "0.5.0")
 	if err != nil {
@@ -93,6 +97,8 @@ func main() {
 
 	mtr := metrics.New()
 
+	healthChecker := health.New(providers, cfg.HealthInterval, cfg.HealthTimeout)
+
 	svc := orchestrator.NewService(orchestrator.Deps{
 		Providers:  providers,
 		Cache:      cache,
@@ -106,6 +112,7 @@ func main() {
 			BaseBackoff: cfg.RetryBaseBackoff,
 			MaxBackoff:  cfg.RetryMaxBackoff,
 		},
+		Health: healthChecker,
 	})
 
 	// gRPC server with tenant + tracing interceptors. The otelgrpc handler
@@ -127,8 +134,14 @@ func main() {
 	adminCtx, adminCancel := context.WithCancel(context.Background())
 	defer adminCancel()
 
+	healthChecker.Start(adminCtx)
+
+	adminExtras := map[string]http.Handler{
+		"/health/providers": healthChecker.Handler(),
+	}
+
 	go func() {
-		if err := metrics.RunAdminServer(adminCtx, mtr, fmt.Sprintf(":%s", cfg.AdminPort)); err != nil {
+		if err := metrics.RunAdminServer(adminCtx, mtr, fmt.Sprintf(":%s", cfg.AdminPort), adminExtras); err != nil {
 			log.Printf("[orchestrator] admin server error: %v", err)
 		}
 	}()

@@ -32,6 +32,8 @@ type OrchestratorConfig struct {
 	RetryMaxAttempts int
 	RetryBaseBackoff time.Duration
 	RetryMaxBackoff  time.Duration
+	HealthInterval   time.Duration
+	HealthTimeout    time.Duration
 }
 
 // WorkerConfig holds configuration for the async worker service.
@@ -86,6 +88,8 @@ func LoadOrchestratorConfig() *OrchestratorConfig {
 		RetryMaxAttempts: getInt("RETRY_MAX_ATTEMPTS", 3),
 		RetryBaseBackoff: getDuration("RETRY_BASE_BACKOFF", 100*time.Millisecond),
 		RetryMaxBackoff:  getDuration("RETRY_MAX_BACKOFF", 2*time.Second),
+		HealthInterval:   getDuration("HEALTH_INTERVAL", 15*time.Second),
+		HealthTimeout:    getDuration("HEALTH_TIMEOUT", 3*time.Second),
 	}
 }
 

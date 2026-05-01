@@ -29,6 +29,14 @@ var tracer = otel.Tracer("orchestrator")
 
 const serviceVersion = "0.5.0"
 
+// HealthSource reports whether a provider is currently considered healthy.
+// The orchestrator uses it to skip a known-bad primary and go straight to
+// the fallback so we don't waste retry budget on a provider we already know
+// is down.
+type HealthSource interface {
+	IsHealthy(name string) bool
+}
+
 // Service implements the gRPC InferenceService.
 type Service struct {
 	pb.UnimplementedInferenceServiceServer
@@ -41,6 +49,7 @@ type Service struct {
 	budgetRepo *budget.Repository
 	metrics    *metrics.Metrics
 	retry      RetryConfig
+	health     HealthSource
 }
 
 // Deps groups the runtime dependencies the service needs. Using a struct
@@ -54,6 +63,7 @@ type Deps struct {
 	BudgetRepo *budget.Repository
 	Metrics    *metrics.Metrics
 	Retry      RetryConfig
+	Health     HealthSource
 }
 
 // NewService constructs the orchestrator with its dependencies. Providers must
@@ -68,6 +78,7 @@ func NewService(d Deps) *Service {
 		budgetRepo: d.BudgetRepo,
 		metrics:    d.Metrics,
 		retry:      d.Retry,
+		health:     d.Health,
 	}
 }
 
@@ -263,7 +274,12 @@ func (s *Service) executeWithFallback(
 	defer span.End()
 
 	primaryProv, ok := s.providers[decision.Primary.Provider]
-	if ok {
+	skipPrimary := s.health != nil && decision.Fallback != nil && !s.health.IsHealthy(decision.Primary.Provider)
+	if skipPrimary {
+		s.observeProviderFailure(decision.Primary.Provider, decision.Primary.Model)
+		log.Printf("[orchestrator] primary %s skipped: known unhealthy",
+			decision.Primary.Provider)
+	} else if ok {
 		result, err := s.executeWithRetry(ctx, primaryProv, &provider.InferenceRequest{
 			Prompt: prompt,
 			Model:  decision.Primary.Model,

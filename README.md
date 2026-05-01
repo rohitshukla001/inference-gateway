@@ -268,6 +268,8 @@ Environment variables with defaults:
 | `RETRY_MAX_ATTEMPTS` | `3` | Orchestrator |
 | `RETRY_BASE_BACKOFF` | `100ms` | Orchestrator |
 | `RETRY_MAX_BACKOFF` | `2s` | Orchestrator |
+| `HEALTH_INTERVAL` | `15s` | Orchestrator |
+| `HEALTH_TIMEOUT` | `3s` | Orchestrator |
 | `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway, Orchestrator, Worker |
 | `REDIS_URL` | `redis://localhost:6379/0` | Gateway, Orchestrator |
 | `NATS_URL` | `nats://localhost:4222` | Gateway, Worker |
@@ -287,6 +289,7 @@ Environment variables with defaults:
 |-----|------|
 | `http://localhost:8080/metrics` | Gateway Prometheus metrics |
 | `http://localhost:9091/metrics` | Orchestrator Prometheus metrics |
+| `http://localhost:9091/health/providers` | Per-provider health snapshot (JSON) |
 | `http://localhost:9094` | Prometheus UI |
 | `http://localhost:3000` | Grafana (anonymous admin login enabled) |
 | `http://localhost:16686` | Jaeger UI |

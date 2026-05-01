@@ -144,6 +144,49 @@ func TestExecuteInference_FallbackTakesOverWhenPrimaryFails(t *testing.T) {
 	}
 }
 
+type stubHealth struct {
+	unhealthy map[string]bool
+}
+
+func (s *stubHealth) IsHealthy(name string) bool { return !s.unhealthy[name] }
+
+func TestExecuteInference_SkipsKnownUnhealthyPrimary(t *testing.T) {
+	primary := &stubProvider{name: "mock"}
+	fallback := &stubProvider{
+		name: "ollama",
+		resp: &provider.InferenceResponse{
+			Output: "from-fallback", Model: "llama3.2", Provider: "ollama",
+			PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+		},
+	}
+	svc := NewService(Deps{
+		Providers: map[string]provider.Provider{
+			"mock":   primary,
+			"ollama": fallback,
+		},
+		Router: router.New(router.DefaultCatalog()),
+		Health: &stubHealth{unhealthy: map[string]bool{"mock": true}},
+	})
+
+	ctx := tenant.WithTenant(context.Background(), &tenant.Tenant{ID: "tid-1"})
+	resp, err := svc.ExecuteInference(ctx, &pb.ExecuteInferenceRequest{
+		Prompt: "hi",
+		Model:  "gpt-4o-mini",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.GetOutput() != "from-fallback" {
+		t.Errorf("expected fallback output, got %q", resp.GetOutput())
+	}
+	if got := atomic.LoadInt64(&primary.calls); got != 0 {
+		t.Errorf("expected 0 primary calls when known unhealthy, got %d", got)
+	}
+	if got := atomic.LoadInt64(&fallback.calls); got != 1 {
+		t.Errorf("expected 1 fallback call, got %d", got)
+	}
+}
+
 func TestExecuteInference_BothFail_ReturnsInternal(t *testing.T) {
 	primary := &stubProvider{name: "mock", err: errors.New("primary boom")}
 	fallback := &stubProvider{name: "ollama", err: errors.New("fallback boom too")}
