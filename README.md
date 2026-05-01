@@ -134,6 +134,10 @@ If none are set, the router picks the cheapest model in the tenant's `default_ti
 |---|---|
 | `Idempotency-Key: <any-string>` | Within `IDEMPOTENCY_TTL` (default 24h), repeated calls with the same key + tenant return the original response verbatim. The replay carries `Idempotent-Replay: true`. |
 
+**Rate limiting:**
+
+Each tenant has a per-second request cap stored in `tenant_rate_limits` (`rps`; `0` means unlimited). Requests above the cap are rejected with `429 Too Many Requests` and a `Retry-After` header in seconds. The dev tenant is seeded with `60 rps`. Both repo and Redis errors fail open so a transient infra blip does not black-hole traffic.
+
 ### `POST /v1/inference/execute_async`
 
 Submit an inference request for asynchronous execution. The body is identical to `/v1/inference/execute`. The gateway persists a pending job, publishes it to NATS for the worker to pick up, and returns immediately.

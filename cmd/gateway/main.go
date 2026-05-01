@@ -21,6 +21,7 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/messaging/natsclient"
 	"github.com/rshuklas/inference-gateway/internal/observability/metrics"
 	"github.com/rshuklas/inference-gateway/internal/observability/tracing"
+	"github.com/rshuklas/inference-gateway/internal/ratelimit"
 	igredis "github.com/rshuklas/inference-gateway/internal/redis"
 	"github.com/rshuklas/inference-gateway/internal/tenant"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
@@ -67,6 +68,7 @@ func main() {
 	log.Println("[gateway] postgres connected")
 
 	tenantRepo := tenant.NewRepository(pool)
+	rateLimitRepo := ratelimit.NewRepository(pool)
 
 	// Redis for idempotency replay.
 	rdsCtx, rdsCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -115,6 +117,7 @@ func main() {
 	mtr := metrics.New()
 
 	authMW := middleware.Auth(tenantRepo)
+	rateLimitMW := middleware.RateLimit(rateLimitRepo, ratelimit.New(rdsClient))
 	idempotencyMW := middleware.Idempotency(rdsClient, cfg.IdempotencyTTL)
 	metricsMW := middleware.Metrics(mtr, nil)
 
@@ -126,15 +129,15 @@ func main() {
 	// ctx, idempotency reads it.
 	mux.Handle(
 		"/v1/inference/execute",
-		metricsMW(authMW(idempotencyMW(http.HandlerFunc(handler.HandleExecute)))),
+		metricsMW(authMW(rateLimitMW(idempotencyMW(http.HandlerFunc(handler.HandleExecute))))),
 	)
 	mux.Handle(
 		"/v1/inference/execute_async",
-		metricsMW(authMW(http.HandlerFunc(handler.HandleSubmitAsync))),
+		metricsMW(authMW(rateLimitMW(http.HandlerFunc(handler.HandleSubmitAsync)))),
 	)
 	mux.Handle(
 		"/v1/jobs/",
-		metricsMW(authMW(http.HandlerFunc(handler.HandleJobStatus))),
+		metricsMW(authMW(rateLimitMW(http.HandlerFunc(handler.HandleJobStatus)))),
 	)
 
 	addr := fmt.Sprintf(":%s", cfg.HTTPPort)
