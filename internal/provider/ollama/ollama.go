@@ -37,13 +37,14 @@ type OllamaProvider struct {
 	httpClient   *http.Client
 }
 
-// New creates a new OllamaProvider with the given endpoint and default model.
-func New(endpoint, defaultModel string) *OllamaProvider {
+// New creates a new OllamaProvider with the given endpoint, default model,
+// and HTTP client timeout. Timeout applies to both Execute and HealthCheck.
+func New(endpoint, defaultModel string, timeout time.Duration) *OllamaProvider {
 	return &OllamaProvider{
 		endpoint:     endpoint,
 		defaultModel: defaultModel,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second, // LLM inference can be slow
+			Timeout: timeout,
 		},
 	}
 }

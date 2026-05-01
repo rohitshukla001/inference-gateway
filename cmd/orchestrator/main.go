@@ -39,6 +39,7 @@ func main() {
 	log.Println("[orchestrator] starting...")
 	log.Printf("[orchestrator] ollama endpoint: %s", cfg.OllamaEndpoint)
 	log.Printf("[orchestrator] default model: %s", cfg.DefaultModel)
+	log.Printf("[orchestrator] ollama timeout: %s", cfg.OllamaTimeout)
 	log.Printf("[orchestrator] cache ttl: %s", cfg.CacheTTL)
 
 	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "orchestrator", "0.5.0")
@@ -81,7 +82,7 @@ func main() {
 	// Provider registry. Both providers are always available; the router
 	// decides which one to call per request.
 	providers := map[string]provider.Provider{
-		"ollama": ollama.New(cfg.OllamaEndpoint, cfg.DefaultModel),
+		"ollama": ollama.New(cfg.OllamaEndpoint, cfg.DefaultModel, cfg.OllamaTimeout),
 		"mock":   mock.New(),
 	}
 	log.Printf("[orchestrator] providers registered: %v", providerNames(providers))

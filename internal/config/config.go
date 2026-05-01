@@ -23,6 +23,7 @@ type OrchestratorConfig struct {
 	AdminPort      string
 	OllamaEndpoint string
 	DefaultModel   string
+	OllamaTimeout  time.Duration
 	PostgresURL    string
 	RedisURL       string
 	OTLPEndpoint   string
@@ -73,6 +74,7 @@ func LoadOrchestratorConfig() *OrchestratorConfig {
 		AdminPort:      getEnv("ORCHESTRATOR_ADMIN_PORT", "9091"),
 		OllamaEndpoint: getEnv("OLLAMA_ENDPOINT", "http://localhost:11434"),
 		DefaultModel:   getEnv("OLLAMA_DEFAULT_MODEL", "llama3.2"),
+		OllamaTimeout:  getDuration("OLLAMA_TIMEOUT", 120*time.Second),
 		PostgresURL:    getEnv("POSTGRES_URL", "postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable"),
 		RedisURL:       getEnv("REDIS_URL", "redis://localhost:6379/0"),
 		OTLPEndpoint:   getEnv("OTLP_ENDPOINT", "localhost:4317"),

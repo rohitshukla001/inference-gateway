@@ -264,6 +264,7 @@ Environment variables with defaults:
 | `ORCHESTRATOR_GRPC_PORT` | `9090` | Orchestrator |
 | `OLLAMA_ENDPOINT` | `http://localhost:11434` | Orchestrator |
 | `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Orchestrator |
+| `OLLAMA_TIMEOUT` | `120s` | Orchestrator |
 | `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway, Orchestrator, Worker |
 | `REDIS_URL` | `redis://localhost:6379/0` | Gateway, Orchestrator |
 | `NATS_URL` | `nats://localhost:4222` | Gateway, Worker |
