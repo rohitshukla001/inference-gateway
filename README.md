@@ -91,9 +91,18 @@ Execute an LLM inference request. **Requires `Authorization: Bearer <key>`.**
     "prompt_tokens": 12,
     "completion_tokens": 45,
     "total_tokens": 57
-  }
+  },
+  "cached": false
 }
 ```
+
+The `cached` field is `true` when the response was served from the Redis exact-match cache and `false` when it was freshly generated.
+
+**Optional headers:**
+
+| Header | Effect |
+|---|---|
+| `Idempotency-Key: <any-string>` | Within `IDEMPOTENCY_TTL` (default 24h), repeated calls with the same key + tenant return the original response verbatim. The replay carries `Idempotent-Replay: true`. |
 
 ### `GET /health`
 
@@ -155,8 +164,13 @@ Environment variables with defaults:
 | `ORCHESTRATOR_GRPC_PORT` | `9090` | Orchestrator |
 | `OLLAMA_ENDPOINT` | `http://localhost:11434` | Orchestrator |
 | `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Orchestrator |
-| `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway |
+| `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway, Orchestrator |
+| `REDIS_URL` | `redis://localhost:6379/0` | Gateway, Orchestrator |
+| `CACHE_TTL` | `1h` | Orchestrator |
+| `IDEMPOTENCY_TTL` | `24h` | Gateway |
 
 ## Version
 
-`v0.1.0` — Phase 1: Thin vertical slice with HTTP gateway, gRPC orchestrator, and Ollama provider.
+`v0.2.0` — Phase 2: Adds Redis exact-match response cache, `Idempotency-Key` middleware, and per-request usage tracking written to Postgres (`usage_records`).
+
+`v0.1.0` — Phase 1: Thin vertical slice with HTTP gateway, gRPC orchestrator, Ollama provider, and API-key + tenant resolution.

@@ -39,6 +39,7 @@ type ExecuteResponse struct {
 	Model    string     `json:"model,omitempty"`
 	Provider string     `json:"provider,omitempty"`
 	Usage    *UsageInfo `json:"usage,omitempty"`
+	Cached   bool       `json:"cached"`
 }
 
 // UsageInfo maps token usage for the HTTP response.
@@ -107,6 +108,7 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 		Output:   grpcResp.GetOutput(),
 		Model:    grpcResp.GetModel(),
 		Provider: grpcResp.GetProvider(),
+		Cached:   grpcResp.GetCached(),
 	}
 
 	if usage := grpcResp.GetUsage(); usage != nil {

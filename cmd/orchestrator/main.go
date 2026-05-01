@@ -3,16 +3,23 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/rshuklas/inference-gateway/internal/cache/responsecache"
 	"github.com/rshuklas/inference-gateway/internal/config"
+	"github.com/rshuklas/inference-gateway/internal/db"
 	"github.com/rshuklas/inference-gateway/internal/orchestrator"
+	"github.com/rshuklas/inference-gateway/internal/orchestrator/grpcserver"
 	"github.com/rshuklas/inference-gateway/internal/provider/ollama"
+	igredis "github.com/rshuklas/inference-gateway/internal/redis"
+	"github.com/rshuklas/inference-gateway/internal/usage"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
@@ -24,28 +31,52 @@ func main() {
 	log.Println("[orchestrator] starting...")
 	log.Printf("[orchestrator] ollama endpoint: %s", cfg.OllamaEndpoint)
 	log.Printf("[orchestrator] default model: %s", cfg.DefaultModel)
+	log.Printf("[orchestrator] cache ttl: %s", cfg.CacheTTL)
 
-	// Initialize Ollama provider
+	// Redis for response cache.
+	rdsCtx, rdsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rdsCancel()
+
+	rdsClient, err := igredis.Connect(rdsCtx, cfg.RedisURL)
+	if err != nil {
+		log.Fatalf("[orchestrator] redis connect failed: %v", err)
+	}
+	defer rdsClient.Close()
+	log.Println("[orchestrator] redis connected")
+
+	cache := responsecache.New(rdsClient, cfg.CacheTTL)
+
+	// Postgres for usage tracking. Migrations are owned by the gateway boot;
+	// orchestrator only opens a pool for writes.
+	pgCtx, pgCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pgCancel()
+
+	pool, err := db.Connect(pgCtx, cfg.PostgresURL)
+	if err != nil {
+		log.Fatalf("[orchestrator] postgres connect failed: %v", err)
+	}
+	defer pool.Close()
+	log.Println("[orchestrator] postgres connected")
+
+	usageRepo := usage.NewRepository(pool)
+
+	// Provider + service.
 	ollamaProvider := ollama.New(cfg.OllamaEndpoint, cfg.DefaultModel)
+	svc := orchestrator.NewService(ollamaProvider, cache, usageRepo)
 
-	// Create orchestrator service
-	svc := orchestrator.NewService(ollamaProvider)
-
-	// Create gRPC server
-	grpcServer := grpc.NewServer()
+	// gRPC server with tenant-extracting interceptor.
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(grpcserver.TenantUnaryInterceptor()),
+	)
 	pb.RegisterInferenceServiceServer(grpcServer, svc)
-
-	// Enable gRPC reflection for debugging with grpcurl
 	reflection.Register(grpcServer)
 
-	// Start listening
 	addr := fmt.Sprintf(":%s", cfg.GRPCPort)
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("[orchestrator] failed to listen on %s: %v", addr, err)
 	}
 
-	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

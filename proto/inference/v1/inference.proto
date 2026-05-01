@@ -40,6 +40,9 @@ message ExecuteInferenceResponse {
 
   // Token usage metadata.
   TokenUsage usage = 4;
+
+  // Whether this response was served from cache (true) or freshly generated.
+  bool cached = 5;
 }
 
 // TokenUsage tracks token consumption for observability and cost tracking.

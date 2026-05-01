@@ -97,7 +97,9 @@ type ExecuteInferenceResponse struct {
 	// The provider that served the request.
 	Provider string `protobuf:"bytes,3,opt,name=provider,proto3" json:"provider,omitempty"`
 	// Token usage metadata.
-	Usage         *TokenUsage `protobuf:"bytes,4,opt,name=usage,proto3" json:"usage,omitempty"`
+	Usage *TokenUsage `protobuf:"bytes,4,opt,name=usage,proto3" json:"usage,omitempty"`
+	// Whether this response was served from cache (true) or freshly generated.
+	Cached        bool `protobuf:"varint,5,opt,name=cached,proto3" json:"cached,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -158,6 +160,13 @@ func (x *ExecuteInferenceResponse) GetUsage() *TokenUsage {
 		return x.Usage
 	}
 	return nil
+}
+
+func (x *ExecuteInferenceResponse) GetCached() bool {
+	if x != nil {
+		return x.Cached
+	}
+	return false
 }
 
 // TokenUsage tracks token consumption for observability and cost tracking.
@@ -325,12 +334,13 @@ const file_inference_v1_inference_proto_rawDesc = "" +
 	"\x17ExecuteInferenceRequest\x12\x16\n" +
 	"\x06prompt\x18\x01 \x01(\tR\x06prompt\x12\x14\n" +
 	"\x05model\x18\x02 \x01(\tR\x05model\x12\x1a\n" +
-	"\bprovider\x18\x03 \x01(\tR\bprovider\"\x94\x01\n" +
+	"\bprovider\x18\x03 \x01(\tR\bprovider\"\xac\x01\n" +
 	"\x18ExecuteInferenceResponse\x12\x16\n" +
 	"\x06output\x18\x01 \x01(\tR\x06output\x12\x14\n" +
 	"\x05model\x18\x02 \x01(\tR\x05model\x12\x1a\n" +
 	"\bprovider\x18\x03 \x01(\tR\bprovider\x12.\n" +
-	"\x05usage\x18\x04 \x01(\v2\x18.inference.v1.TokenUsageR\x05usage\"\x81\x01\n" +
+	"\x05usage\x18\x04 \x01(\v2\x18.inference.v1.TokenUsageR\x05usage\x12\x16\n" +
+	"\x06cached\x18\x05 \x01(\bR\x06cached\"\x81\x01\n" +
 	"\n" +
 	"TokenUsage\x12#\n" +
 	"\rprompt_tokens\x18\x01 \x01(\x05R\fpromptTokens\x12+\n" +
