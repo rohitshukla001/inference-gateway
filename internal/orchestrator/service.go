@@ -11,17 +11,23 @@ import (
 
 	"github.com/rshuklas/inference-gateway/internal/budget"
 	"github.com/rshuklas/inference-gateway/internal/cache/responsecache"
+	"github.com/rshuklas/inference-gateway/internal/observability/metrics"
 	"github.com/rshuklas/inference-gateway/internal/policy"
 	"github.com/rshuklas/inference-gateway/internal/provider"
 	"github.com/rshuklas/inference-gateway/internal/router"
 	"github.com/rshuklas/inference-gateway/internal/tenant"
 	"github.com/rshuklas/inference-gateway/internal/usage"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-const serviceVersion = "0.4.0"
+var tracer = otel.Tracer("orchestrator")
+
+const serviceVersion = "0.5.0"
 
 // Service implements the gRPC InferenceService.
 type Service struct {
@@ -33,6 +39,7 @@ type Service struct {
 	router     *router.Router
 	policyRepo *policy.Repository
 	budgetRepo *budget.Repository
+	metrics    *metrics.Metrics
 }
 
 // Deps groups the runtime dependencies the service needs. Using a struct
@@ -44,6 +51,7 @@ type Deps struct {
 	Router     *router.Router
 	PolicyRepo *policy.Repository
 	BudgetRepo *budget.Repository
+	Metrics    *metrics.Metrics
 }
 
 // NewService constructs the orchestrator with its dependencies. Providers must
@@ -56,6 +64,7 @@ func NewService(d Deps) *Service {
 		router:     d.Router,
 		policyRepo: d.PolicyRepo,
 		budgetRepo: d.BudgetRepo,
+		metrics:    d.Metrics,
 	}
 }
 
@@ -113,6 +122,9 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 		log.Printf("[orchestrator] cache HIT | tenant=%s model=%s latency_ms=%d",
 			t.ID, hit.Model, latency.Milliseconds())
 
+		s.observeCacheHit(t.ID, hit.Model)
+		s.observeLatency(t.ID, hit.Model, hit.Provider, "cached", latency)
+
 		s.recordUsage(ctx, usage.Record{
 			TenantID:     t.ID,
 			Model:        hit.Model,
@@ -126,6 +138,7 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 		return resp, nil
 	}
 
+	s.observeCacheMiss(t.ID, decision.Primary.Model)
 	log.Printf("[orchestrator] cache MISS | tenant=%s model=%s", t.ID, decision.Primary.Model)
 
 	// Budget gate. Cache hits short-circuit above so they bypass this; the
@@ -137,6 +150,7 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 	// Primary attempt. On error, fall back if available.
 	served, result, err := s.executeWithFallback(ctx, decision, req.GetPrompt())
 	if err != nil {
+		s.observeLatency(t.ID, decision.Primary.Model, decision.Primary.Provider, "error", time.Since(start))
 		log.Printf("[orchestrator] all providers failed: %v", err)
 		return nil, status.Error(codes.Internal, fmt.Sprintf("provider execution failed: %v", err))
 	}
@@ -150,6 +164,9 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 	}
 
 	cost := served.Pricing.Cost(result.PromptTokens, result.CompletionTokens)
+
+	s.observeLatency(t.ID, result.Model, result.Provider, "ok", latency)
+	s.observeCost(t.ID, result.Model, result.Provider, cost)
 
 	s.recordUsage(ctx, usage.Record{
 		TenantID:     t.ID,
@@ -235,6 +252,13 @@ func (s *Service) executeWithFallback(
 	decision router.Decision,
 	prompt string,
 ) (router.ModelEntry, *provider.InferenceResponse, error) {
+	ctx, span := tracer.Start(ctx, "provider.execute", trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("provider", decision.Primary.Provider),
+			attribute.String("model", decision.Primary.Model),
+		))
+	defer span.End()
+
 	primaryProv, ok := s.providers[decision.Primary.Provider]
 	if ok {
 		result, err := primaryProv.Execute(ctx, &provider.InferenceRequest{
@@ -244,9 +268,11 @@ func (s *Service) executeWithFallback(
 		if err == nil {
 			return decision.Primary, result, nil
 		}
+		s.observeProviderFailure(decision.Primary.Provider, decision.Primary.Model)
 		log.Printf("[orchestrator] primary %s/%s failed: %v",
 			decision.Primary.Provider, decision.Primary.Model, err)
 	} else {
+		s.observeProviderFailure(decision.Primary.Provider, decision.Primary.Model)
 		log.Printf("[orchestrator] primary provider %q not in registry", decision.Primary.Provider)
 	}
 
@@ -265,6 +291,7 @@ func (s *Service) executeWithFallback(
 		Model:  decision.Fallback.Model,
 	})
 	if err != nil {
+		s.observeProviderFailure(decision.Fallback.Provider, decision.Fallback.Model)
 		return router.ModelEntry{}, nil, fmt.Errorf("fallback also failed: %w", err)
 	}
 	return *decision.Fallback, result, nil
@@ -290,8 +317,12 @@ func (s *Service) tryCache(ctx context.Context, key string) (cachedEntry, *pb.Ex
 	if s.cache == nil {
 		return cachedEntry{}, nil, false
 	}
+	ctx, span := tracer.Start(ctx, "cache.lookup", trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
 	var entry cachedEntry
 	hit, err := s.cache.Get(ctx, key, &entry)
+	span.SetAttributes(attribute.Bool("cache.hit", hit))
 	if err != nil {
 		log.Printf("[orchestrator] cache get failed: %v", err)
 		return cachedEntry{}, nil, false
@@ -327,6 +358,44 @@ func (s *Service) storeCache(ctx context.Context, key string, result *provider.I
 	if err := s.cache.Set(ctx, key, entry); err != nil {
 		log.Printf("[orchestrator] cache set failed: %v", err)
 	}
+}
+
+// observe* helpers fan out to Prometheus when metrics is wired and no-op
+// otherwise. The nil checks live here so the call sites stay free of
+// metrics noise.
+func (s *Service) observeLatency(tenantID, model, provider, statusLabel string, latency time.Duration) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.InferenceLatency.WithLabelValues(tenantID, model, provider, statusLabel).Observe(latency.Seconds())
+}
+
+func (s *Service) observeCacheHit(tenantID, model string) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.CacheHits.WithLabelValues(tenantID, model).Inc()
+}
+
+func (s *Service) observeCacheMiss(tenantID, model string) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.CacheMisses.WithLabelValues(tenantID, model).Inc()
+}
+
+func (s *Service) observeProviderFailure(provider, model string) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.ProviderFailures.WithLabelValues(provider, model).Inc()
+}
+
+func (s *Service) observeCost(tenantID, model, provider string, cost float64) {
+	if s.metrics == nil || cost <= 0 {
+		return
+	}
+	s.metrics.InferenceCost.WithLabelValues(tenantID, model, provider).Add(cost)
 }
 
 func (s *Service) recordUsage(ctx context.Context, rec usage.Record) {

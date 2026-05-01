@@ -16,6 +16,8 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/cache/responsecache"
 	"github.com/rshuklas/inference-gateway/internal/config"
 	"github.com/rshuklas/inference-gateway/internal/db"
+	"github.com/rshuklas/inference-gateway/internal/observability/metrics"
+	"github.com/rshuklas/inference-gateway/internal/observability/tracing"
 	"github.com/rshuklas/inference-gateway/internal/orchestrator"
 	"github.com/rshuklas/inference-gateway/internal/orchestrator/grpcserver"
 	"github.com/rshuklas/inference-gateway/internal/policy"
@@ -26,6 +28,7 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/router"
 	"github.com/rshuklas/inference-gateway/internal/usage"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -37,6 +40,17 @@ func main() {
 	log.Printf("[orchestrator] ollama endpoint: %s", cfg.OllamaEndpoint)
 	log.Printf("[orchestrator] default model: %s", cfg.DefaultModel)
 	log.Printf("[orchestrator] cache ttl: %s", cfg.CacheTTL)
+
+	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "orchestrator", "0.5.0")
+	if err != nil {
+		log.Printf("[orchestrator] tracing init failed (continuing without): %v", err)
+		traceShutdown = func(context.Context) error { return nil }
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = traceShutdown(ctx)
+	}()
 
 	// Redis (response cache).
 	rdsCtx, rdsCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -74,6 +88,8 @@ func main() {
 
 	rtr := router.New(router.DefaultCatalog())
 
+	mtr := metrics.New()
+
 	svc := orchestrator.NewService(orchestrator.Deps{
 		Providers:  providers,
 		Cache:      cache,
@@ -81,10 +97,14 @@ func main() {
 		Router:     rtr,
 		PolicyRepo: policyRepo,
 		BudgetRepo: budgetRepo,
+		Metrics:    mtr,
 	})
 
-	// gRPC server with tenant interceptor.
+	// gRPC server with tenant + tracing interceptors. The otelgrpc handler
+	// has to come first so the tenant interceptor sees a span-bearing
+	// context.
 	grpcServer := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(grpcserver.TenantUnaryInterceptor()),
 	)
 	pb.RegisterInferenceServiceServer(grpcServer, svc)
@@ -96,11 +116,21 @@ func main() {
 		log.Fatalf("[orchestrator] failed to listen on %s: %v", addr, err)
 	}
 
+	adminCtx, adminCancel := context.WithCancel(context.Background())
+	defer adminCancel()
+
+	go func() {
+		if err := metrics.RunAdminServer(adminCtx, mtr, fmt.Sprintf(":%s", cfg.AdminPort)); err != nil {
+			log.Printf("[orchestrator] admin server error: %v", err)
+		}
+	}()
+
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		log.Println("[orchestrator] shutting down...")
+		adminCancel()
 		grpcServer.GracefulStop()
 	}()
 

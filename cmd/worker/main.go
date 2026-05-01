@@ -17,8 +17,10 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/gateway/grpcclient"
 	"github.com/rshuklas/inference-gateway/internal/jobs"
 	"github.com/rshuklas/inference-gateway/internal/messaging/natsclient"
+	"github.com/rshuklas/inference-gateway/internal/observability/tracing"
 	"github.com/rshuklas/inference-gateway/internal/worker"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -32,29 +34,41 @@ func main() {
 	log.Printf("[worker] job timeout: %s sweeper: every %s threshold %s",
 		cfg.JobTimeout, cfg.SweepInterval, cfg.StuckJobThreshold)
 
+	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "worker", "0.5.0")
+	if err != nil {
+		log.Printf("[worker] tracing init failed (continuing without): %v", err)
+		traceShutdown = func(context.Context) error { return nil }
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = traceShutdown(ctx)
+	}()
+
 	pgCtx, pgCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer pgCancel()
-	pool, err := db.Connect(pgCtx, cfg.PostgresURL)
-	if err != nil {
-		log.Fatalf("[worker] postgres connect failed: %v", err)
+	pool, dbErr := db.Connect(pgCtx, cfg.PostgresURL)
+	if dbErr != nil {
+		log.Fatalf("[worker] postgres connect failed: %v", dbErr)
 	}
 	defer pool.Close()
 	log.Println("[worker] postgres connected")
 
-	natsConn, err := natsclient.Connect(cfg.NATSURL)
-	if err != nil {
-		log.Fatalf("[worker] nats connect failed: %v", err)
+	natsConn, natsErr := natsclient.Connect(cfg.NATSURL)
+	if natsErr != nil {
+		log.Fatalf("[worker] nats connect failed: %v", natsErr)
 	}
 	defer natsConn.Close()
 	log.Println("[worker] nats connected")
 
-	conn, err := grpc.NewClient(
+	conn, dialErr := grpc.NewClient(
 		cfg.OrchestratorGRPCAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithUnaryInterceptor(grpcclient.TenantUnaryInterceptor()),
 	)
-	if err != nil {
-		log.Fatalf("[worker] orchestrator dial failed: %v", err)
+	if dialErr != nil {
+		log.Fatalf("[worker] orchestrator dial failed: %v", dialErr)
 	}
 	defer conn.Close()
 	orchClient := pb.NewInferenceServiceClient(conn)

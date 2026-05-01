@@ -19,9 +19,13 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/gateway/middleware"
 	"github.com/rshuklas/inference-gateway/internal/jobs"
 	"github.com/rshuklas/inference-gateway/internal/messaging/natsclient"
+	"github.com/rshuklas/inference-gateway/internal/observability/metrics"
+	"github.com/rshuklas/inference-gateway/internal/observability/tracing"
 	igredis "github.com/rshuklas/inference-gateway/internal/redis"
 	"github.com/rshuklas/inference-gateway/internal/tenant"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -32,6 +36,17 @@ func main() {
 	log.Println("[gateway] starting...")
 	log.Printf("[gateway] connecting to orchestrator at %s", cfg.OrchestratorGRPCAddr)
 	log.Printf("[gateway] idempotency ttl: %s", cfg.IdempotencyTTL)
+
+	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "gateway", "0.5.0")
+	if err != nil {
+		log.Printf("[gateway] tracing init failed (continuing without): %v", err)
+		traceShutdown = func(context.Context) error { return nil }
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = traceShutdown(ctx)
+	}()
 
 	// Migrate schema before opening the long-lived pool.
 	log.Println("[gateway] running migrations...")
@@ -80,10 +95,13 @@ func main() {
 		jobsSvc = jobs.NewService(jobsRepo, jobs.NewNATSPublisher(natsConn))
 	}
 
-	// gRPC client to orchestrator with tenant-propagating interceptor.
+	// gRPC client to orchestrator with tenant-propagating + tracing
+	// interceptors. otelgrpc injects traceparent headers; the tenant
+	// interceptor adds x-tenant-id.
 	conn, err := grpc.NewClient(
 		cfg.OrchestratorGRPCAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithUnaryInterceptor(grpcclient.TenantUnaryInterceptor()),
 	)
 	if err != nil {
@@ -94,28 +112,34 @@ func main() {
 	client := pb.NewInferenceServiceClient(conn)
 	handler := gateway.NewHandler(client, jobsSvc)
 
+	mtr := metrics.New()
+
 	authMW := middleware.Auth(tenantRepo)
 	idempotencyMW := middleware.Idempotency(rdsClient, cfg.IdempotencyTTL)
+	metricsMW := middleware.Metrics(mtr, nil)
 
 	mux := http.NewServeMux()
-	// Health is intentionally unauthenticated.
-	mux.HandleFunc("/health", handler.HandleHealth)
-	// Order matters: auth attaches the tenant to ctx; idempotency reads it.
+	// Health and /metrics are intentionally unauthenticated.
+	mux.Handle("/health", metricsMW(http.HandlerFunc(handler.HandleHealth)))
+	mux.Handle("/metrics", mtr.Handler())
+	// Order matters: metrics wraps everything, auth attaches the tenant to
+	// ctx, idempotency reads it.
 	mux.Handle(
 		"/v1/inference/execute",
-		authMW(idempotencyMW(http.HandlerFunc(handler.HandleExecute))),
+		metricsMW(authMW(idempotencyMW(http.HandlerFunc(handler.HandleExecute)))),
 	)
 	mux.Handle(
 		"/v1/inference/execute_async",
-		authMW(http.HandlerFunc(handler.HandleSubmitAsync)),
+		metricsMW(authMW(http.HandlerFunc(handler.HandleSubmitAsync))),
 	)
 	mux.Handle(
 		"/v1/jobs/",
-		authMW(http.HandlerFunc(handler.HandleJobStatus)),
+		metricsMW(authMW(http.HandlerFunc(handler.HandleJobStatus))),
 	)
 
 	addr := fmt.Sprintf(":%s", cfg.HTTPPort)
-	server := &http.Server{Addr: addr, Handler: mux}
+	tracedHandler := otelhttp.NewHandler(mux, "gateway", otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents))
+	server := &http.Server{Addr: addr, Handler: tracedHandler}
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
