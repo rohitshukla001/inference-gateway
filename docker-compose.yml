@@ -30,6 +30,15 @@ services:
       - "6379:6379"
     restart: unless-stopped
 
+  nats:
+    image: nats:2.10-alpine
+    container_name: ig-nats
+    ports:
+      - "4222:4222"   # client
+      - "8222:8222"   # monitoring
+    command: ["-m", "8222"]
+    restart: unless-stopped
+
 volumes:
   ollama_data:
   pg_data:

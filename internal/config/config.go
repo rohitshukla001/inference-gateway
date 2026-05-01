@@ -12,6 +12,7 @@ type GatewayConfig struct {
 	OrchestratorGRPCAddr string
 	PostgresURL          string
 	RedisURL             string
+	NATSURL              string
 	IdempotencyTTL       time.Duration
 }
 
@@ -25,6 +26,16 @@ type OrchestratorConfig struct {
 	CacheTTL       time.Duration
 }
 
+// WorkerConfig holds configuration for the async worker service.
+type WorkerConfig struct {
+	OrchestratorGRPCAddr string
+	PostgresURL          string
+	NATSURL              string
+	StuckJobThreshold    time.Duration
+	SweepInterval        time.Duration
+	JobTimeout           time.Duration
+}
+
 // LoadGatewayConfig reads gateway configuration from environment variables with sensible defaults.
 func LoadGatewayConfig() *GatewayConfig {
 	return &GatewayConfig{
@@ -32,7 +43,20 @@ func LoadGatewayConfig() *GatewayConfig {
 		OrchestratorGRPCAddr: getEnv("ORCHESTRATOR_GRPC_ADDR", "localhost:9090"),
 		PostgresURL:          getEnv("POSTGRES_URL", "postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable"),
 		RedisURL:             getEnv("REDIS_URL", "redis://localhost:6379/0"),
+		NATSURL:              getEnv("NATS_URL", "nats://localhost:4222"),
 		IdempotencyTTL:       getDuration("IDEMPOTENCY_TTL", 24*time.Hour),
+	}
+}
+
+// LoadWorkerConfig reads worker configuration from environment variables with sensible defaults.
+func LoadWorkerConfig() *WorkerConfig {
+	return &WorkerConfig{
+		OrchestratorGRPCAddr: getEnv("ORCHESTRATOR_GRPC_ADDR", "localhost:9090"),
+		PostgresURL:          getEnv("POSTGRES_URL", "postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable"),
+		NATSURL:              getEnv("NATS_URL", "nats://localhost:4222"),
+		StuckJobThreshold:    getDuration("STUCK_JOB_THRESHOLD", 5*time.Minute),
+		SweepInterval:        getDuration("SWEEP_INTERVAL", 30*time.Second),
+		JobTimeout:           getDuration("JOB_TIMEOUT", 2*time.Minute),
 	}
 }
 
