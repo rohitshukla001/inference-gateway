@@ -15,23 +15,22 @@ type Inputs struct {
 	Prompt        string
 }
 
-// Decision is the chosen primary model plus an optional fallback the
-// orchestrator should retry against if the primary fails.
+// Decision is the chosen primary plus an optional fallback to use if the
+// primary fails.
 type Decision struct {
 	Primary  ModelEntry
 	Fallback *ModelEntry
 }
 
-// Sentinel errors. The orchestrator maps these to gRPC codes.
+// Routing errors; the orchestrator maps them to gRPC codes.
 var (
 	ErrModelNotAllowed   = errors.New("model not allowed for tenant")
 	ErrModelNotInCatalog = errors.New("model not in router catalog")
 	ErrNoCandidates      = errors.New("no model satisfies routing constraints")
 )
 
-// Router picks one ModelEntry from a catalog given the inputs and tenant
-// policy. The selection algorithm is intentionally simple and deterministic
-// so failures are easy to explain.
+// Router picks a ModelEntry from a catalog. Selection is deterministic so
+// decisions are easy to explain.
 type Router struct {
 	catalog Catalog
 }
@@ -43,13 +42,12 @@ func New(catalog Catalog) *Router {
 
 // Route applies the routing rules:
 //
-//  1. If ExplicitModel is set, use it (after a policy + catalog check).
-//  2. Otherwise, filter the catalog by policy + budget + SLA constraints,
-//     prefer the tenant's default_tier, then break ties by input price.
+//  1. If ExplicitModel is set, use it (after a policy and catalog check).
+//  2. Otherwise, filter the catalog by policy, max_cost and latency SLA,
+//     prefer the tenant's default_tier, then pick the lowest input price.
 //  3. The fallback, if available, is the local Ollama entry, unless the
 //     primary is already Ollama.
 func (r *Router) Route(in Inputs, pol *policy.Policy) (Decision, error) {
-	// Path 1: explicit model.
 	if in.ExplicitModel != "" {
 		if pol != nil && !pol.AllowsModel(in.ExplicitModel) {
 			return Decision{}, fmt.Errorf("%w: %s", ErrModelNotAllowed, in.ExplicitModel)
@@ -61,7 +59,6 @@ func (r *Router) Route(in Inputs, pol *policy.Policy) (Decision, error) {
 		return r.withFallback(entry), nil
 	}
 
-	// Path 2: rule-based selection.
 	candidates := r.candidates(in, pol)
 	if len(candidates) == 0 {
 		return Decision{}, ErrNoCandidates
@@ -91,9 +88,9 @@ func (r *Router) candidates(in Inputs, pol *policy.Policy) Catalog {
 	return out
 }
 
-// withFallback decorates a primary with a local-Ollama fallback when
-// available and distinct. A single-deep chain is enough to handle "primary
-// provider down" without inviting cascading retries.
+// withFallback adds the local Ollama fallback when it exists and differs from
+// the primary. One level is enough for a down primary and avoids cascading
+// retries.
 func (r *Router) withFallback(primary ModelEntry) Decision {
 	if primary.Provider == "ollama" {
 		return Decision{Primary: primary}
@@ -105,10 +102,8 @@ func (r *Router) withFallback(primary ModelEntry) Decision {
 	return Decision{Primary: primary, Fallback: &fb}
 }
 
-// pickPrimary chooses the best candidate. Preference order:
-//  1. Entries matching the tenant's default tier
-//  2. Among matches, lowest input price (cheap == cheap, deterministic)
-//  3. Among ties, first in catalog order
+// pickPrimary returns the lowest-input-price candidate in prefTier (any tier
+// if none match), with ties going to the first in catalog order.
 func pickPrimary(cands Catalog, prefTier Tier) ModelEntry {
 	tiered := cands.ByTier(prefTier)
 	if len(tiered) == 0 {

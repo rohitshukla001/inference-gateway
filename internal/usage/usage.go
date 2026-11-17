@@ -36,8 +36,7 @@ INSERT INTO usage_records (
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `
 
-// Insert persists r. Caller is expected to have already populated TenantID;
-// records without one are rejected to keep the partition keys clean.
+// Insert persists rec. Records without a TenantID are rejected.
 func (r *Repository) Insert(ctx context.Context, rec Record) error {
 	if rec.TenantID == "" {
 		return fmt.Errorf("usage record missing tenant id")

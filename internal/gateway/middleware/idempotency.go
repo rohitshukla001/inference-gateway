@@ -16,19 +16,17 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-// IdempotencyHeader is the request header clients set to make a write call
-// safely retryable. Identical (tenant, key) pairs return the cached response.
+// IdempotencyHeader is the request header that makes a call safely
+// retryable within a tenant.
 const IdempotencyHeader = "Idempotency-Key"
 
 // inFlightTTL bounds how long a key stays claimed if the gateway dies
 // mid-request without releasing it. It must outlast the slowest request.
 const inFlightTTL = 5 * time.Minute
 
-// idempotencyEntry is the on-wire shape of a claimed key. While the first
-// request runs it holds only InProgress and the request fingerprint; once
-// that request succeeds it holds the response to replay. Headers are
-// intentionally omitted: only status + body round-trip, which is enough for
-// JSON APIs and avoids leaking server-internal headers across requests.
+// idempotencyEntry is the stored value of a claimed key: InProgress plus the
+// body fingerprint while the first request runs, then the response to replay.
+// Headers are not stored, so internal headers never leak across requests.
 type idempotencyEntry struct {
 	InProgress  bool   `json:"in_progress,omitempty"`
 	Fingerprint string `json:"fingerprint"`
@@ -36,12 +34,11 @@ type idempotencyEntry struct {
 	Body        []byte `json:"body,omitempty"`
 }
 
-// Idempotency returns middleware that deduplicates identical requests within
-// a tenant scope using the Idempotency-Key header.
+// Idempotency deduplicates requests per tenant by Idempotency-Key. It must
+// run after Auth and MaxBody.
 //
 // Behaviour:
-//   - No header on the request: pass through, no-op.
-//   - No tenant in ctx: pass through (auth middleware should have rejected first).
+//   - No header, or no tenant in ctx: pass through.
 //   - Key unused: claim it atomically (SET NX), run the handler, then store
 //     the response if 2xx or release the key otherwise so the client can retry.
 //   - Key used with a different request body: 422.
@@ -93,8 +90,8 @@ func Idempotency(client *goredis.Client, ttl time.Duration) func(http.Handler) h
 				entry, ok := loadEntry(r.Context(), client, redisKey)
 				switch {
 				case !ok:
-					// Expired between SETNX and GET, or unreadable. Ask the
-					// client to retry rather than risk a duplicate call.
+					// Expired between SETNX and GET, or unreadable: ask for a
+					// retry rather than risk a duplicate call.
 					writeIdemError(w, http.StatusConflict, "idempotency key busy, retry")
 				case entry.Fingerprint != fingerprint:
 					writeIdemError(w, http.StatusUnprocessableEntity, "idempotency key reused with a different request body")
@@ -110,13 +107,12 @@ func Idempotency(client *goredis.Client, ttl time.Duration) func(http.Handler) h
 			rec := &captureWriter{ResponseWriter: w, status: http.StatusOK, body: &bytes.Buffer{}}
 			next.ServeHTTP(rec, r)
 
-			// The handler has finished; record the outcome even if the
-			// client already went away.
+			// Record the outcome even if the client already went away.
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Second)
 			defer cancel()
 
-			// Only persist successful responses. Replaying a 5xx would punish
-			// retries; replaying a 4xx is debatable but keeps surprises low.
+			// Persist only 2xx; anything else releases the key so the
+			// client can retry.
 			if rec.status >= 200 && rec.status < 300 {
 				storeEntry(ctx, client, redisKey, idempotencyEntry{
 					Fingerprint: fingerprint,
@@ -172,9 +168,8 @@ func replay(w http.ResponseWriter, entry idempotencyEntry) {
 	_, _ = w.Write(entry.Body)
 }
 
-// captureWriter buffers status + body so the middleware can persist them
-// after the handler completes, while still streaming the original response
-// to the client.
+// captureWriter copies status and body for storage while still writing the
+// response to the client.
 type captureWriter struct {
 	http.ResponseWriter
 	status      int

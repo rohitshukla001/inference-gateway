@@ -10,9 +10,8 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/provider"
 )
 
-// RetryConfig controls the per-provider retry behavior on transient failures.
-// MaxAttempts is the total number of attempts including the first one; values
-// of 0 or 1 disable retries.
+// RetryConfig controls per-provider retries. MaxAttempts includes the first
+// attempt; 0 or 1 disables retries.
 type RetryConfig struct {
 	MaxAttempts int
 	BaseBackoff time.Duration
@@ -20,10 +19,9 @@ type RetryConfig struct {
 }
 
 // executeWithRetry runs p.Execute with exponential backoff and full jitter.
-// Context cancellation and errors provider.IsRetryable rejects (bad
-// requests, timeouts) stop the loop at once so the caller can move on to
-// the fallback; other errors are retried so a transient provider blip can
-// recover without bumping to the fallback.
+// Context cancellation and errors provider.IsRetryable rejects (NonRetryable
+// errors such as bad requests, and timeouts) return at once so the caller can
+// try the fallback; other errors are retried in case the blip is transient.
 func (s *Service) executeWithRetry(
 	ctx context.Context,
 	p provider.Provider,
@@ -63,8 +61,8 @@ func (s *Service) executeWithRetry(
 	return nil, fmt.Errorf("exhausted %d attempts: %w", attempts, lastErr)
 }
 
-// backoffDelay returns a full-jitter delay capped at maxBackoff. attempt is
-// zero-indexed (0 → first backoff, doubling thereafter).
+// backoffDelay returns a full-jitter delay in [0, min(base<<attempt,
+// maxBackoff)). attempt is zero-indexed.
 func backoffDelay(attempt int, base, maxBackoff time.Duration) time.Duration {
 	if base <= 0 {
 		return 0

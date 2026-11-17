@@ -23,8 +23,7 @@ func TestIdempotency_NoHeader_Passthrough(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Passing nil client is fine because the middleware short-circuits before
-	// touching Redis when no header is present.
+	// A nil client is safe: without the header Redis is never touched.
 	rr := httptest.NewRecorder()
 	Idempotency(nil, time.Hour)(next).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/", nil))
 

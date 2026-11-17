@@ -28,8 +28,8 @@ WHERE k.key_hash = $1
 LIMIT 1
 `
 
-// GetByAPIKey resolves the tenant that owns the given raw API key.
-// Returns ErrNotFound if the key is unknown or the tenant is not active.
+// GetByAPIKey resolves the tenant owning rawKey. Returns ErrNotFound if the
+// key is unknown or the tenant is not active.
 func (r *Repository) GetByAPIKey(ctx context.Context, rawKey string) (*Tenant, error) {
 	hash := HashAPIKey(rawKey)
 

@@ -1,7 +1,5 @@
-// Package metrics defines the Prometheus collectors the inference gateway
-// exposes. All collectors live on a private Registry rather than the global
-// default so multiple test instances can coexist and so the binary controls
-// exactly which metrics ship.
+// Package metrics defines the services' Prometheus collectors. They live on a
+// private Registry, not the global one, so test instances can coexist.
 package metrics
 
 import (
@@ -12,40 +10,36 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Metrics groups every collector the services emit. Pass it down to the
-// instrumentation seams; tests construct their own.
+// Metrics groups every collector the services emit.
 type Metrics struct {
 	registry *prometheus.Registry
 
-	// HTTPRequestsTotal counts gateway HTTP requests by method, route
-	// template, and response status class. Route is templated to keep
-	// cardinality bounded (no raw job ids in label values).
+	// HTTPRequestsTotal counts gateway HTTP requests by method, route and
+	// status code. Route is templated to keep cardinality bounded (no raw
+	// job ids).
 	HTTPRequestsTotal *prometheus.CounterVec
 
-	// HTTPRequestDuration is the histogram of gateway HTTP request
-	// durations in seconds, labelled the same way as the counter.
+	// HTTPRequestDuration is gateway HTTP latency, labelled like the counter.
 	HTTPRequestDuration *prometheus.HistogramVec
 
-	// InferenceLatency is the orchestrator-side end-to-end latency in
-	// seconds, broken down by tenant, model, provider, and outcome.
+	// InferenceLatency is orchestrator end-to-end latency by tenant, model,
+	// provider and status.
 	InferenceLatency *prometheus.HistogramVec
 
 	// CacheHits and CacheMisses count exact-cache results per tenant+model.
 	CacheHits   *prometheus.CounterVec
 	CacheMisses *prometheus.CounterVec
 
-	// ProviderFailures counts upstream provider errors. Useful for
-	// alerting on a single provider going degraded.
+	// ProviderFailures counts upstream provider errors per provider and model.
 	ProviderFailures *prometheus.CounterVec
 
-	// InferenceCost accumulates USD spend per tenant+model+provider for
-	// dashboards; the budget guard reads from Postgres, not from this.
+	// InferenceCost accumulates USD spend for dashboards; the budget guard
+	// reads Postgres, not this.
 	InferenceCost *prometheus.CounterVec
 }
 
-// New constructs a Metrics with all collectors registered on a fresh
-// Registry. The Go and process collectors come along for free so we get
-// goroutine count, GC pauses, etc., without extra wiring.
+// New returns a Metrics with all collectors, plus the Go and process
+// collectors, registered on a fresh Registry.
 func New() *Metrics {
 	r := prometheus.NewRegistry()
 	r.MustRegister(
@@ -126,14 +120,12 @@ func New() *Metrics {
 	return m
 }
 
-// Registry returns the underlying Prometheus registry. Used by the
-// /metrics handler and by tests that gather the snapshot.
+// Registry returns the underlying Prometheus registry.
 func (m *Metrics) Registry() *prometheus.Registry {
 	return m.registry
 }
 
-// Handler returns an http.Handler that serves the Prometheus exposition
-// format from this Metrics' registry.
+// Handler serves this registry in the Prometheus exposition format.
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
 }

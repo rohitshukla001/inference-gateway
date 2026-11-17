@@ -1,9 +1,10 @@
-// Package jobs persists async inference jobs and exposes the state machine
-// the gateway and worker share. The state graph is:
+// Package jobs persists async inference jobs and the state machine the
+// gateway and worker share:
 //
 //	pending --claim--> running --success--> completed
-//	                          --failure--> failed
-//	                          --sweep---->  failed (stuck timeout)
+//	                           --failure--> failed
+//	                           --sweep----> failed (stuck)
+//	pending --enqueue failure or sweep----> failed
 package jobs
 
 import (
@@ -12,7 +13,7 @@ import (
 	"time"
 )
 
-// Status is one of the four states a job can be in.
+// Status is a job's lifecycle state.
 type Status string
 
 // Status values.
@@ -23,9 +24,8 @@ const (
 	StatusFailed    Status = "failed"
 )
 
-// ErrNotFound is returned when the job does not exist or does not belong to
-// the calling tenant. We deliberately collapse those two cases so the API
-// does not leak which job_ids are valid for other tenants.
+// ErrNotFound is returned when the job is missing or belongs to another
+// tenant; the cases are merged so job IDs don't leak across tenants.
 var ErrNotFound = errors.New("job not found")
 
 // Job is a single async inference job row.

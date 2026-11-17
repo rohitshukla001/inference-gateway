@@ -7,7 +7,7 @@ import (
 	"net"
 )
 
-// InferenceRequest represents a normalized request to any LLM provider.
+// InferenceRequest is a provider-agnostic inference request.
 type InferenceRequest struct {
 	Prompt string
 	Model  string
@@ -15,7 +15,7 @@ type InferenceRequest struct {
 	MaxTokens int32
 }
 
-// InferenceResponse represents a normalized response from any LLM provider.
+// InferenceResponse is a provider-agnostic inference response.
 type InferenceResponse struct {
 	Output           string
 	Model            string
@@ -25,33 +25,29 @@ type InferenceResponse struct {
 	TotalTokens      int32
 }
 
-// Pricing describes per-token cost rates for a provider in USD per 1k tokens.
-// Local providers (Ollama) report zero rates.
+// Pricing holds token rates in USD per 1k tokens. Local providers report zero.
 type Pricing struct {
 	InputPer1k  float64
 	OutputPer1k float64
 }
 
-// Cost computes the post-flight cost for the given token counts.
+// Cost returns the USD cost of the given token counts.
 func (p Pricing) Cost(inputTokens, outputTokens int32) float64 {
 	return (float64(inputTokens)/1000.0)*p.InputPer1k +
 		(float64(outputTokens)/1000.0)*p.OutputPer1k
 }
 
-// Provider is the interface that all LLM providers must implement.
-// This is the core abstraction that enables multi-provider support.
+// Provider is the interface every LLM backend implements.
 type Provider interface {
-	// Name returns the provider identifier (e.g., "ollama", "openai", "mock").
+	// Name returns the provider identifier, e.g. "ollama" or "mock".
 	Name() string
 
-	// Execute sends a prompt to the provider and returns the generated response.
 	Execute(ctx context.Context, req *InferenceRequest) (*InferenceResponse, error)
 
-	// HealthCheck verifies the provider is reachable and operational.
+	// HealthCheck returns nil if the provider is reachable.
 	HealthCheck(ctx context.Context) error
 
-	// Pricing returns the per-token rates for the given model. Returns zero
-	// rates and ok=false for an unknown model.
+	// Pricing returns the rates for model, or ok=false if it is unknown.
 	Pricing(model string) (Pricing, bool)
 }
 
@@ -70,9 +66,9 @@ func NonRetryable(err error) error {
 	return nonRetryableError{err: err}
 }
 
-// IsRetryable reports whether another attempt at the same provider could
-// succeed. Errors marked NonRetryable are not; neither are timeouts, since a
-// call that already used its whole time budget would only use it again.
+// IsRetryable reports whether retrying the same provider could succeed.
+// NonRetryable errors are not, nor are timeouts and cancellations: a call
+// that used its whole time budget would only use it again.
 func IsRetryable(err error) bool {
 	var nr nonRetryableError
 	if errors.As(err, &nr) {

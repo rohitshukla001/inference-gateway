@@ -9,10 +9,8 @@ import (
 	"time"
 )
 
-// RunAdminServer starts an HTTP server on addr that exposes /metrics from
-// m's registry, plus any extra path/handler pairs the caller provides
-// (e.g. /health/providers). It blocks until ctx is cancelled and then drains
-// in-flight requests before returning.
+// RunAdminServer serves /metrics and the extra handlers on addr. It blocks
+// until ctx is cancelled, then drains in-flight requests.
 func RunAdminServer(ctx context.Context, m *Metrics, addr string, extras map[string]http.Handler) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", m.Handler())

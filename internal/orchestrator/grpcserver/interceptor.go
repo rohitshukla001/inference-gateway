@@ -9,15 +9,13 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// TenantMetadataKey mirrors the gateway-side constant for the metadata key
-// used to carry the tenant id across services.
+// TenantMetadataKey is the gRPC metadata key carrying the tenant ID; it
+// matches the gateway-side constant.
 const TenantMetadataKey = "x-tenant-id"
 
-// TenantUnaryInterceptor returns a unary server interceptor that extracts the
-// x-tenant-id from incoming gRPC metadata and attaches a tenant.Tenant carrying
-// just the ID to the context. Downstream code uses tenant.FromContext to read
-// it. Calls without the header proceed without a tenant; the handler may
-// reject if it requires one.
+// TenantUnaryInterceptor attaches a tenant.Tenant holding only the
+// x-tenant-id metadata value to the context. Calls without it proceed with no
+// tenant; handlers that need one reject them.
 func TenantUnaryInterceptor() grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,

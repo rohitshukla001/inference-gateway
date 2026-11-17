@@ -1,6 +1,5 @@
-// Package health runs periodic provider health checks and exposes the latest
-// known state. Lookup is in-memory and per-process; orchestrator replicas
-// each maintain their own view rather than sharing state via Redis.
+// Package health runs periodic provider health checks. State is in-memory
+// and per-process; each orchestrator replica keeps its own view.
 package health
 
 import (
@@ -23,9 +22,9 @@ type State struct {
 	LastCheck time.Time `json:"last_check"`
 }
 
-// Checker periodically pings each registered provider and tracks the latest
-// result. Initial state is optimistic (healthy=true) so a fresh process does
-// not deny traffic before the first ping.
+// Checker pings each provider periodically and tracks the latest result.
+// Providers start healthy so a fresh process does not deny traffic before
+// the first ping.
 type Checker struct {
 	providers map[string]provider.Provider
 	interval  time.Duration
@@ -35,9 +34,8 @@ type Checker struct {
 	states map[string]State
 }
 
-// New builds a Checker that pings each provider every interval, with timeout
-// applied per-ping. interval <= 0 disables the background loop; in that case
-// IsHealthy still returns the initial optimistic value.
+// New builds a Checker that pings every interval with a per-ping timeout.
+// interval <= 0 disables pinging, leaving every provider healthy.
 func New(providers map[string]provider.Provider, interval, timeout time.Duration) *Checker {
 	states := make(map[string]State, len(providers))
 	for name := range providers {
@@ -51,8 +49,7 @@ func New(providers map[string]provider.Provider, interval, timeout time.Duration
 	}
 }
 
-// Start kicks off a background goroutine that pings on interval until ctx is
-// cancelled. Safe to call once; subsequent calls are no-ops.
+// Start pings in the background until ctx is cancelled. Call it once.
 func (c *Checker) Start(ctx context.Context) {
 	if c.interval <= 0 {
 		return
@@ -103,8 +100,8 @@ func (c *Checker) update(name string, err error) {
 	}
 }
 
-// IsHealthy reports the latest known health for name. Unknown providers
-// return false (unsafe by default).
+// IsHealthy reports the latest health for name; unknown providers are
+// unhealthy.
 func (c *Checker) IsHealthy(name string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -121,8 +118,7 @@ func (c *Checker) Snapshot() map[string]State {
 	return out
 }
 
-// Handler serves the JSON snapshot at any path. Wire it onto an admin mux at
-// /health/providers (or wherever).
+// Handler serves the snapshot as JSON, sorted by provider name.
 func (c *Checker) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		snap := c.Snapshot()

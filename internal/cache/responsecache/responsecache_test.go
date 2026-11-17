@@ -40,7 +40,6 @@ func TestKey_Format(t *testing.T) {
 	if len(got) <= len(wantPrefix) || got[:len(wantPrefix)] != wantPrefix {
 		t.Errorf("expected prefix %q, got %q", wantPrefix, got)
 	}
-	// 64 hex chars after prefix
 	if len(got)-len(wantPrefix) != 64 {
 		t.Errorf("expected 64 hex chars after prefix, got %d", len(got)-len(wantPrefix))
 	}

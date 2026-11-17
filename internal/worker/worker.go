@@ -1,7 +1,6 @@
-// Package worker implements the async job consumer. It pulls job messages
-// from a JetStream consumer, claims pending jobs, executes them via the
-// orchestrator's gRPC ExecuteInference RPC, persists the result, and only
-// then acknowledges the message.
+// Package worker consumes async jobs from a JetStream pull consumer, runs
+// them through the orchestrator's ExecuteInference RPC, persists the result,
+// and only then acks the message.
 package worker
 
 import (
@@ -20,8 +19,8 @@ import (
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
 )
 
-// resultWriteTimeout bounds the final job-status write, which runs on its
-// own context so it succeeds even after the job's deadline has passed.
+// resultWriteTimeout bounds the final status write, which runs on its own
+// context so it still lands after the job deadline has passed.
 const resultWriteTimeout = 5 * time.Second
 
 // jobStore is the slice of jobs.Repository the worker needs.
@@ -65,10 +64,10 @@ func New(
 	}
 }
 
-// Start pulls and processes messages until ctx is cancelled, then stops
-// pulling and waits for in-flight jobs to finish. Jobs run on their own
-// contexts (bounded by jobTimeout) so a shutdown does not abort them.
-// Messages fetched but not yet started are redelivered after AckWait.
+// Start processes messages until ctx is cancelled, then waits for in-flight
+// jobs. Jobs run on their own jobTimeout-bounded contexts so shutdown does
+// not abort them; buffered messages not yet started are redelivered after
+// AckWait.
 func (w *Worker) Start(ctx context.Context) error {
 	iter, err := w.consumer.Messages(jetstream.PullMaxMessages(w.concurrency))
 	if err != nil {
@@ -81,8 +80,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	slots := make(chan struct{}, w.concurrency)
 	var wg sync.WaitGroup
 	for {
-		// Take a slot before pulling so we never hold more messages than
-		// we can run.
+		// Take a slot first so we never hold more messages than we can run.
 		slots <- struct{}{}
 		msg, err := iter.Next()
 		if err != nil {
@@ -104,9 +102,10 @@ func (w *Worker) Start(ctx context.Context) error {
 	return nil
 }
 
-// handle processes one message. The message is acknowledged once the job
-// reaches a terminal state (or is found already claimed); a transient
-// failure to claim naks it for redelivery; a malformed message is dropped.
+// handle processes one message. Once the job is claimed (or found already
+// claimed) the message is acked whatever the outcome; a row left running by
+// a failed result write is reaped by the sweeper. A Claim error naks for
+// redelivery; a malformed message is terminated.
 func (w *Worker) handle(msg queueMsg) {
 	jobID, tenantID, err := jobs.DecodeQueueMessage(msg.Data())
 	if err != nil {
@@ -150,8 +149,8 @@ func (w *Worker) handle(msg queueMsg) {
 	})
 	if err != nil {
 		log.Printf("[worker] orchestrator error | job=%s err=%v", jobID, err)
-		// Store the same client-safe message the sync API would return,
-		// not the raw error, which can carry provider internals.
+		// Store the client-safe message the sync API returns, not the raw
+		// error, which can carry provider internals.
 		_, msg := gateway.MapGRPCError(err)
 		w.fail(jobID, msg)
 		return
@@ -195,8 +194,8 @@ func (w *Worker) fail(jobID, errMsg string) {
 	}
 }
 
-// RunSweeper periodically marks orphan pending and running jobs as failed. Returns when
-// ctx is cancelled.
+// RunSweeper periodically fails stale pending and running jobs until ctx is
+// cancelled.
 func RunSweeper(ctx context.Context, repo *jobs.Repository, interval, threshold time.Duration) {
 	if interval <= 0 || threshold <= 0 {
 		log.Printf("[worker] sweeper disabled (interval=%s threshold=%s)", interval, threshold)

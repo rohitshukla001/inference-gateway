@@ -129,7 +129,6 @@ func TestAuth_LowercaseScheme_Accepted(t *testing.T) {
 	}
 }
 
-// errFakeBackend is a sentinel for the backend-error test.
 var errFakeBackend = stubError("backend exploded")
 
 type stubError string

@@ -7,11 +7,12 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// InternalTokenMetadataKey mirrors the orchestrator-side constant.
+// InternalTokenMetadataKey is the metadata key for the internal token; it
+// must match the orchestrator's grpcserver constant.
 const InternalTokenMetadataKey = "x-internal-token"
 
 // InternalAuthUnaryInterceptor attaches the shared internal token to every
-// outgoing call so the orchestrator accepts it.
+// outgoing call.
 func InternalAuthUnaryInterceptor(token string) grpc.UnaryClientInterceptor {
 	return func(
 		ctx context.Context,

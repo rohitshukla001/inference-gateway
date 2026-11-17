@@ -1,5 +1,5 @@
-// Orchestrator is the gRPC service that coordinates inference requests
-// between the gateway and LLM providers.
+// Orchestrator is the gRPC service that routes inference requests from the
+// gateway and worker to LLM providers.
 package main
 
 import (
@@ -63,7 +63,6 @@ func main() {
 		_ = traceShutdown(ctx)
 	}()
 
-	// Redis (response cache).
 	rdsCtx, rdsCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer rdsCancel()
 	rdsClient, err := igredis.Connect(rdsCtx, cfg.RedisURL)
@@ -75,7 +74,6 @@ func main() {
 
 	cache := responsecache.New(rdsClient, cfg.CacheTTL)
 
-	// Postgres (usage + policy).
 	pgCtx, pgCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer pgCancel()
 	pool, err := db.Connect(pgCtx, cfg.PostgresURL)
@@ -89,8 +87,7 @@ func main() {
 	policyRepo := policy.NewCachedRepository(policy.NewRepository(pool), rdsClient, cfg.ConfigCacheTTL)
 	budgetRepo := budget.NewCachedRepository(budget.NewRepository(pool), rdsClient, cfg.ConfigCacheTTL)
 
-	// Provider registry. Both providers are always available; the router
-	// decides which one to call per request.
+	// Both providers are always registered; the router picks one per request.
 	providers := map[string]provider.Provider{
 		"ollama": ollama.New(cfg.OllamaEndpoint, cfg.DefaultModel, cfg.OllamaTimeout),
 		"mock":   mock.New(),
@@ -119,10 +116,9 @@ func main() {
 		Health: healthChecker,
 	})
 
-	// gRPC server with auth + tenant + tracing interceptors. The otelgrpc
-	// handler has to come first so the interceptors see a span-bearing
-	// context. Internal auth runs before tenant extraction so x-tenant-id
-	// is only trusted from authenticated callers.
+	// otelgrpc runs first so the interceptors see a span-bearing context.
+	// Internal auth runs before tenant extraction so x-tenant-id is only
+	// trusted from authenticated callers.
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainUnaryInterceptor(

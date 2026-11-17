@@ -12,22 +12,19 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/tenant"
 )
 
-// RateLimitRepo is the slice of ratelimit.Repository the middleware needs.
-// Defined here so tests can stub the Postgres lookup.
+// RateLimitRepo returns a tenant's configured requests per second.
 type RateLimitRepo interface {
 	GetRPS(ctx context.Context, tenantID string) (int, error)
 }
 
-// RateLimitChecker is the slice of ratelimit.Limiter the middleware needs.
+// RateLimitChecker is the subset of ratelimit.Limiter the middleware needs.
 type RateLimitChecker interface {
 	Allow(ctx context.Context, tenantID string, rps int) (ratelimit.Decision, error)
 }
 
-// RateLimit returns a middleware that enforces per-tenant request caps. It
-// must run after Auth (so a tenant is on the context). A tenant with no
-// rate-limit row is treated as unlimited; both repo and Redis errors fail
-// open (allow the request) so a transient infra blip can't black-hole
-// traffic.
+// RateLimit enforces per-tenant request caps and must run after Auth. A
+// tenant with no limit row is unlimited. Lookup and Redis errors fail open so
+// an infra blip can't black-hole traffic.
 func RateLimit(repo RateLimitRepo, limiter RateLimitChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

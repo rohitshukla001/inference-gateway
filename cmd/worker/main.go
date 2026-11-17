@@ -1,6 +1,5 @@
-// Worker is the async job consumer for the Inference Gateway. It pulls
-// pending jobs off NATS, executes them via the orchestrator's gRPC API,
-// and persists the result.
+// Worker consumes async jobs from NATS JetStream, runs them through the
+// orchestrator over gRPC, and persists the result.
 package main
 
 import (

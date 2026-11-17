@@ -1,10 +1,9 @@
 // Package ratelimit implements a per-tenant request limiter backed by Redis.
 //
-// The algorithm is a fixed-window counter at 1-second granularity: each
-// request increments rl:{tenant}:{epoch_second} and is allowed if the
-// resulting count stays within the configured rps. This is simpler than a
-// true sliding window and accurate enough for the v1 demo; the trade-off is
-// burstiness at second boundaries, which is acceptable for a coarse cap.
+// It is a fixed-window counter per second: each request increments
+// rl:{tenant}:{epoch_second} and is allowed while the count is within rps.
+// Simpler than a sliding window, at the cost of allowing up to 2x rps in a
+// burst straddling a second boundary; acceptable for a coarse cap.
 package ratelimit
 
 import (
@@ -32,10 +31,8 @@ type Decision struct {
 	RetryAfter time.Duration
 }
 
-// Allow checks the current second's bucket for tenantID against rps. An rps
-// of 0 means unlimited and always returns Allowed=true. The bucket key has a
-// 2-second TTL, set atomically with the increment, so old buckets evict on
-// their own.
+// Allow counts the request in the current second's bucket and checks it
+// against rps; rps <= 0 means unlimited. Buckets expire after 2 seconds.
 func (l *Limiter) Allow(ctx context.Context, tenantID string, rps int) (Decision, error) {
 	if rps <= 0 {
 		return Decision{Allowed: true}, nil
@@ -45,8 +42,7 @@ func (l *Limiter) Allow(ctx context.Context, tenantID string, rps int) (Decision
 	bucket := now.Unix()
 	key := fmt.Sprintf("rl:%s:%d", tenantID, bucket)
 
-	// INCR and EXPIRE run in one MULTI/EXEC so a bucket can never be left
-	// without a TTL.
+	// INCR and EXPIRE share one MULTI/EXEC so a bucket never lacks a TTL.
 	pipe := l.rds.TxPipeline()
 	incr := pipe.Incr(ctx, key)
 	pipe.Expire(ctx, key, 2*time.Second)

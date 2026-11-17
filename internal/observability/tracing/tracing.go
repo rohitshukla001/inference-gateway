@@ -1,6 +1,4 @@
-// Package tracing wires the OpenTelemetry SDK with an OTLP gRPC exporter
-// pointed at Jaeger. It exposes one entry point - Init - that each binary
-// calls during startup and one shutdown function the binary defers.
+// Package tracing sets up OpenTelemetry tracing with an OTLP gRPC exporter.
 package tracing
 
 import (
@@ -17,11 +15,9 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
-// Init configures the global tracer provider and propagator. endpoint is
-// the OTLP gRPC endpoint (e.g., localhost:4317) and serviceName is the
-// resource attribute used to filter traces in Jaeger. Returns a shutdown
-// function the caller must defer; passing an empty endpoint installs a
-// no-op tracer.
+// Init installs the global tracer provider and W3C propagators, exporting to
+// the OTLP gRPC endpoint (e.g. localhost:4317), and returns a shutdown func
+// the caller must defer. An empty endpoint leaves tracing disabled.
 func Init(ctx context.Context, endpoint, serviceName, version string) (func(context.Context) error, error) {
 	if endpoint == "" {
 		log.Printf("[tracing] disabled (no endpoint configured)")

@@ -1,4 +1,4 @@
-// Package grpcclient holds gateway-side gRPC client utilities.
+// Package grpcclient holds gRPC client interceptors used by the gateway and worker.
 package grpcclient
 
 import (
@@ -9,14 +9,11 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// TenantMetadataKey is the gRPC metadata key used to propagate the resolved
-// tenant id from the gateway to downstream services.
+// TenantMetadataKey is the gRPC metadata key that carries the tenant id.
 const TenantMetadataKey = "x-tenant-id"
 
-// TenantUnaryInterceptor returns a unary client interceptor that attaches the
-// tenant id from the request context to the outgoing gRPC metadata. If no
-// tenant is present, the call proceeds without the header (the server will
-// decide how to handle that).
+// TenantUnaryInterceptor copies the tenant id from ctx into outgoing
+// metadata. Calls without a tenant go out without it; the server decides.
 func TenantUnaryInterceptor() grpc.UnaryClientInterceptor {
 	return func(
 		ctx context.Context,

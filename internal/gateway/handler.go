@@ -1,5 +1,5 @@
-// Package gateway implements the HTTP API layer that translates REST requests
-// into gRPC calls to the orchestrator service.
+// Package gateway implements the HTTP API, translating REST requests into
+// orchestrator gRPC calls and async job submissions.
 package gateway
 
 import (
@@ -19,8 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// JobsService is the subset of the jobs facade the handler needs. Defined as
-// an interface so handler tests can stub it without Postgres or NATS.
+// JobsService is the subset of jobs.Service the handler needs.
 type JobsService interface {
 	Submit(ctx context.Context, tenantID string, requestPayload []byte) (string, error)
 	Get(ctx context.Context, tenantID, jobID string) (*jobs.Job, error)
@@ -36,9 +35,8 @@ type Handler struct {
 	requestTimeout     time.Duration
 }
 
-// NewHandler creates a new gateway handler with the given orchestrator gRPC
-// client and jobs service. jobsSvc may be nil if the caller does not wire
-// async endpoints (the sync handler still works).
+// NewHandler returns a Handler. jobsSvc may be nil, in which case the async
+// endpoints return 503.
 func NewHandler(client pb.InferenceServiceClient, jobsSvc JobsService) *Handler {
 	return &Handler{
 		orchestratorClient: client,
@@ -213,9 +211,8 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, resp)
 }
 
-// HandleSubmitAsync handles POST /v1/inference/execute_async. It validates
-// the request, persists a pending job, publishes it to the worker queue, and
-// returns the job_id immediately.
+// HandleSubmitAsync handles POST /v1/inference/execute_async: it persists and
+// enqueues a pending job and returns its job_id with 202.
 func (h *Handler) HandleSubmitAsync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -358,10 +355,9 @@ func writeError(w http.ResponseWriter, code int, message string) {
 	writeJSON(w, code, ErrorResponse{Error: message, Code: code})
 }
 
-// MapGRPCError translates an upstream gRPC error into an HTTP status + a
-// message that is safe to show clients. The orchestrator's status.Error
-// contracts define the mapping; unknown codes default to 502 Bad Gateway
-// with a generic message so internal details never leak.
+// MapGRPCError maps an orchestrator gRPC error to an HTTP status and a
+// client-safe message. Unmapped codes become 502 with a generic message so
+// internal details never leak.
 func MapGRPCError(err error) (int, string) {
 	st, ok := status.FromError(err)
 	if !ok {
@@ -373,7 +369,7 @@ func MapGRPCError(err error) (int, string) {
 	case codes.PermissionDenied:
 		return http.StatusForbidden, st.Message()
 	case codes.ResourceExhausted:
-		// Reserved for the Phase 3 budget guard.
+		// Monthly budget exceeded.
 		return http.StatusPaymentRequired, st.Message()
 	case codes.Unavailable:
 		return http.StatusServiceUnavailable, "service temporarily unavailable"

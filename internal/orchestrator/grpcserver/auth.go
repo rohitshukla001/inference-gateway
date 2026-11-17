@@ -10,13 +10,14 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// InternalTokenMetadataKey carries the shared service token that the gateway
-// and worker present to the orchestrator.
+// InternalTokenMetadataKey carries the shared service token the gateway and
+// worker present to the orchestrator.
 const InternalTokenMetadataKey = "x-internal-token"
 
-// InternalAuthUnaryInterceptor rejects any call that does not carry the
-// shared internal token. The orchestrator trusts x-tenant-id, so only the
-// gateway and worker (which resolve tenants themselves) may call it.
+// InternalAuthUnaryInterceptor rejects calls without the shared internal
+// token, and all calls if token is empty. The orchestrator trusts
+// x-tenant-id, so only the gateway and worker, which resolve tenants
+// themselves, may call it.
 func InternalAuthUnaryInterceptor(token string) grpc.UnaryServerInterceptor {
 	want := []byte(token)
 	return func(

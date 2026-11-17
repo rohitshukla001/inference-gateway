@@ -1,4 +1,4 @@
-// Package ollama implements the provider interface for the Ollama local LLM runtime.
+// Package ollama implements provider.Provider for a local Ollama runtime.
 package ollama
 
 import (
@@ -42,8 +42,8 @@ type OllamaProvider struct {
 	httpClient   *http.Client
 }
 
-// New creates a new OllamaProvider with the given endpoint, default model,
-// and HTTP client timeout. Timeout applies to both Execute and HealthCheck.
+// New creates an OllamaProvider. timeout applies to both Execute and
+// HealthCheck.
 func New(endpoint, defaultModel string, timeout time.Duration) *OllamaProvider {
 	return &OllamaProvider{
 		endpoint:     endpoint,
@@ -69,7 +69,7 @@ func (o *OllamaProvider) Execute(ctx context.Context, req *provider.InferenceReq
 	ollamaReq := ollamaGenerateRequest{
 		Model:  model,
 		Prompt: req.Prompt,
-		Stream: false, // Non-streaming for Phase 1
+		Stream: false,
 	}
 	if req.MaxTokens > 0 {
 		ollamaReq.Options = &ollamaOptions{NumPredict: req.MaxTokens}
@@ -118,9 +118,7 @@ func (o *OllamaProvider) Execute(ctx context.Context, req *provider.InferenceReq
 	}, nil
 }
 
-// Pricing returns zero rates for any model. Ollama runs locally so there is
-// no per-token cost. This still needs to be implemented to satisfy the
-// Provider interface and to keep cost math uniform across providers.
+// Pricing returns zero rates for any model: Ollama runs locally.
 func (o *OllamaProvider) Pricing(_ string) (provider.Pricing, bool) {
 	return provider.Pricing{}, true
 }

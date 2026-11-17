@@ -1,6 +1,6 @@
-// Package mock implements the Provider interface with simulated OpenAI-style
-// models. It is used during development to exercise routing, fallback, and
-// budget logic without burning real provider tokens.
+// Package mock implements provider.Provider with simulated OpenAI-style
+// models, to exercise routing, fallback, and budget logic without real
+// provider calls.
 package mock
 
 import (
@@ -13,9 +13,8 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/provider"
 )
 
-// ModelSpec is the simulated cost + latency profile for a single mock model.
-// Setting Fail=true causes Execute to error every time, useful for exercising
-// the fallback path in tests.
+// ModelSpec is a mock model's pricing and latency. Fail makes every Execute
+// return a retryable error.
 type ModelSpec struct {
 	Pricing   provider.Pricing
 	LatencyMs int
@@ -27,8 +26,8 @@ type Provider struct {
 	models map[string]ModelSpec
 }
 
-// DefaultModels returns the standard mock catalog mirroring real OpenAI rates
-// (Aug 2024) so cost math during demos is realistic.
+// DefaultModels returns the default mock catalog, priced at the rates of the
+// OpenAI models it is named after.
 func DefaultModels() map[string]ModelSpec {
 	return map[string]ModelSpec{
 		"gpt-4o-mini": {
@@ -47,8 +46,7 @@ func New() *Provider {
 	return &Provider{models: DefaultModels()}
 }
 
-// NewWithModels returns a Provider seeded with custom specs. Used by tests
-// that need failure injection or different rates.
+// NewWithModels returns a Provider seeded with specs.
 func NewWithModels(specs map[string]ModelSpec) *Provider {
 	return &Provider{models: specs}
 }
@@ -65,8 +63,8 @@ func (p *Provider) Pricing(model string) (provider.Pricing, bool) {
 	return spec.Pricing, true
 }
 
-// Execute simulates a model call with the configured latency, returning a
-// deterministic echo response for predictable demos.
+// Execute waits the model's latency and returns a deterministic echo of the
+// prompt. Token counts are word counts; completion is capped at MaxTokens.
 func (p *Provider) Execute(ctx context.Context, req *provider.InferenceRequest) (*provider.InferenceResponse, error) {
 	spec, ok := p.models[req.Model]
 	if !ok {

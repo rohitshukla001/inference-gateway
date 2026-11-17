@@ -12,8 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ErrNotFound means the tenant has no budget row. The orchestrator treats
-// this as "no limit" so dev tenants without a row keep working.
+// ErrNotFound means the tenant has no budget row; the orchestrator treats it
+// as no limit.
 var ErrNotFound = errors.New("tenant budget not found")
 
 // ErrOverBudget means the call's projected cost does not fit in the
@@ -96,10 +96,10 @@ SELECT COALESCE(
     0)
 `
 
-// Reserve atomically adds amount to the tenant's current-month spend if the
-// result stays within limit. It returns ErrOverBudget (with the current
-// spend) when it would not. The check and the increment are one statement,
-// so concurrent callers cannot both pass on the same headroom.
+// Reserve adds amount to the tenant's current-month spend if the total stays
+// within limit, else returns an OverBudgetError with current spend. The check
+// and increment are one statement, so concurrent callers cannot both claim
+// the same headroom.
 func (r *Repository) Reserve(ctx context.Context, tenantID string, amount, limit float64) (*Reservation, error) {
 	if amount > limit {
 		return nil, r.overBudget(ctx, tenantID)

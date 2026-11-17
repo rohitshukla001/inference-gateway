@@ -1,5 +1,5 @@
-// Gateway is the HTTP entry point for the Inference Gateway.
-// It exposes a REST API and delegates inference calls to the orchestrator via gRPC.
+// Gateway serves the public REST API: sync inference is forwarded to the
+// orchestrator over gRPC, async jobs are enqueued on NATS JetStream.
 package main
 
 import (
@@ -61,7 +61,6 @@ func main() {
 	}
 	log.Println("[gateway] migrations applied")
 
-	// Postgres pool for tenant lookups.
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer dbCancel()
 
@@ -72,7 +71,6 @@ func main() {
 	defer pool.Close()
 	log.Println("[gateway] postgres connected")
 
-	// Redis for idempotency replay.
 	rdsCtx, rdsCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer rdsCancel()
 
@@ -86,8 +84,8 @@ func main() {
 	tenantRepo := tenant.NewCachedRepository(tenant.NewRepository(pool), rdsClient, cfg.AuthCacheTTL)
 	rateLimitRepo := ratelimit.NewCachedRepository(ratelimit.NewRepository(pool), rdsClient, cfg.ConfigCacheTTL)
 
-	// NATS for async job queue. If the broker is down at startup we still
-	// boot - the sync path stays healthy and the async endpoint reports 503.
+	// NATS is optional at startup: without it the sync path still serves and
+	// the async endpoints return 503.
 	natsConn, err := natsclient.Connect(cfg.NATSURL)
 	if err != nil {
 		log.Printf("[gateway] nats connect failed (async disabled): %v", err)
@@ -105,9 +103,8 @@ func main() {
 		}
 	}
 
-	// gRPC client to orchestrator with tenant-propagating + tracing
-	// interceptors. otelgrpc injects traceparent headers; the tenant
-	// interceptor adds x-tenant-id.
+	// otelgrpc injects traceparent; the interceptors add the internal token
+	// and x-tenant-id.
 	conn, err := grpc.NewClient(
 		cfg.OrchestratorGRPCAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -137,8 +134,8 @@ func main() {
 	// Health and /metrics are intentionally unauthenticated.
 	mux.Handle("/health", metricsMW(http.HandlerFunc(handler.HandleHealth)))
 	mux.Handle("/metrics", mtr.Handler())
-	// Order matters: metrics wraps everything, auth attaches the tenant to
-	// ctx, idempotency reads it.
+	// Order matters: auth puts the tenant on ctx for rate limiting and
+	// idempotency, and MaxBody must wrap idempotency because it reads the body.
 	mux.Handle(
 		"/v1/inference/execute",
 		metricsMW(authMW(rateLimitMW(bodyMW(idempotencyMW(http.HandlerFunc(handler.HandleExecute)))))),

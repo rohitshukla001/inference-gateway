@@ -1,4 +1,4 @@
-// Package middleware contains gateway HTTP middleware (auth, idempotency, etc.).
+// Package middleware contains the gateway's HTTP middleware.
 package middleware
 
 import (
@@ -12,14 +12,13 @@ import (
 	"github.com/rshuklas/inference-gateway/internal/tenant"
 )
 
-// TenantResolver looks up a tenant by raw API key. It's the minimal contract
-// the auth middleware needs, which keeps tests independent of Postgres.
+// TenantResolver looks up a tenant by raw API key.
 type TenantResolver interface {
 	GetByAPIKey(ctx context.Context, rawKey string) (*tenant.Tenant, error)
 }
 
-// Auth returns a middleware that enforces Bearer-token API key auth and
-// attaches the resolved tenant to the request context.
+// Auth enforces Bearer API key auth and puts the resolved tenant on the
+// request context.
 func Auth(resolver TenantResolver) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,9 +44,8 @@ func Auth(resolver TenantResolver) func(http.Handler) http.Handler {
 	}
 }
 
-// bearerToken parses an "Authorization: Bearer <key>" header and returns the
-// raw key. It accepts case-insensitive scheme matching to be lenient with
-// clients.
+// bearerToken extracts the key from an "Authorization: Bearer <key>" header.
+// The scheme is matched case-insensitively.
 func bearerToken(header string) (string, bool) {
 	const scheme = "bearer"
 	parts := strings.SplitN(strings.TrimSpace(header), " ", 2)

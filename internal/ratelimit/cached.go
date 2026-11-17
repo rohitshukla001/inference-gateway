@@ -15,10 +15,9 @@ type rpsReader interface {
 	GetRPS(ctx context.Context, tenantID string) (int, error)
 }
 
-// CachedRepository is a Redis read-through cache in front of a Repository
-// so the rate-limit cap is not read from Postgres on every request. A
-// tenant without a row is cached as 0 (unlimited), which is how callers
-// already treat ErrNotFound.
+// CachedRepository is a Redis read-through cache over Repository so the cap
+// is not read from Postgres on every request. A tenant without a row is
+// cached as 0 (unlimited), matching how callers treat ErrNotFound.
 type CachedRepository struct {
 	inner rpsReader
 	rds   *goredis.Client
@@ -30,8 +29,8 @@ func NewCachedRepository(inner *Repository, rds *goredis.Client, ttl time.Durati
 	return &CachedRepository{inner: inner, rds: rds, ttl: ttl}
 }
 
-// GetRPS returns the cached cap for tenantID if present, otherwise loads it
-// and primes the cache. Cache failures are logged and treated as a miss.
+// GetRPS returns the cached cap for tenantID, or loads and caches it. Redis
+// errors are logged and treated as a miss.
 func (c *CachedRepository) GetRPS(ctx context.Context, tenantID string) (int, error) {
 	key := "rps:" + tenantID
 	if raw, err := c.rds.Get(ctx, key).Result(); err == nil {

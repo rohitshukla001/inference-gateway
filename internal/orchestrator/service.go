@@ -1,5 +1,5 @@
-// Package orchestrator implements the gRPC InferenceService that coordinates
-// between the gateway and LLM providers.
+// Package orchestrator implements the gRPC InferenceService between the
+// gateway and the LLM providers.
 package orchestrator
 
 import (
@@ -29,17 +29,14 @@ var tracer = otel.Tracer("orchestrator")
 
 const serviceVersion = "0.6.0"
 
-// HealthSource reports whether a provider is currently considered healthy.
-// The orchestrator uses it to skip a known-bad primary and go straight to
-// the fallback so we don't waste retry budget on a provider we already know
-// is down.
+// HealthSource reports whether a provider is currently healthy. It lets the
+// service skip a known-down primary instead of spending retries on it.
 type HealthSource interface {
 	IsHealthy(name string) bool
 }
 
-// PolicyReader is the slice of policy.Repository the service needs. Defined
-// here so we can drop in either the direct Postgres repository or a cached
-// wrapper without touching the service.
+// PolicyReader is the slice of policy.Repository the service needs, so the
+// Postgres repository or its cached wrapper can be used.
 type PolicyReader interface {
 	Get(ctx context.Context, tenantID string) (*policy.Policy, error)
 }
@@ -67,8 +64,7 @@ type Service struct {
 	health     HealthSource
 }
 
-// Deps groups the runtime dependencies the service needs. Using a struct
-// keeps NewService stable as we add Phase 3+ capabilities.
+// Deps groups the service's runtime dependencies.
 type Deps struct {
 	Providers  map[string]provider.Provider
 	Cache      *responsecache.Cache
@@ -81,8 +77,8 @@ type Deps struct {
 	Health     HealthSource
 }
 
-// NewService constructs the orchestrator with its dependencies. Providers must
-// contain at least one entry; the rest are optional and may be nil for tests.
+// NewService builds a Service. Providers must have at least one entry; the
+// other dependencies may be nil.
 func NewService(d Deps) *Service {
 	return &Service{
 		providers:  d.Providers,
@@ -97,8 +93,7 @@ func NewService(d Deps) *Service {
 	}
 }
 
-// cachedEntry is the on-wire shape of a cached response. Mirrors the fields we
-// hand back to clients.
+// cachedEntry is the JSON shape of a cached response.
 type cachedEntry struct {
 	Output           string `json:"output"`
 	Model            string `json:"model"`
@@ -108,8 +103,8 @@ type cachedEntry struct {
 	TotalTokens      int32  `json:"total_tokens"`
 }
 
-// ExecuteInference routes the request, attempts the cache, calls the chosen
-// provider (with a 1-deep fallback), and records usage.
+// ExecuteInference routes the request, checks the cache, reserves budget,
+// calls the primary (falling back once), settles the budget and records usage.
 func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInferenceRequest) (*pb.ExecuteInferenceResponse, error) {
 	if req.GetPrompt() == "" {
 		return nil, status.Error(codes.InvalidArgument, "prompt is required")
@@ -120,14 +115,12 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 		return nil, status.Error(codes.Unauthenticated, "missing tenant context")
 	}
 
-	// Tenant policy. Missing is treated as "no constraints" so dev tenants
-	// without a row keep working; production rollouts will require one.
+	// A missing policy row means no constraints.
 	pol, err := s.loadPolicy(ctx, t.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Routing decision.
 	decision, err := s.router.Route(router.Inputs{
 		ExplicitModel: req.GetModel(),
 		MaxCost:       req.GetMaxCost(),
@@ -144,8 +137,8 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 	start := time.Now()
 	cacheKey := responsecache.Key(t.ID, decision.Primary.Model, req.GetPrompt())
 
-	// Cache lookup keyed on the routed primary so policy-driven changes
-	// don't return stale results from a different model.
+	// Keyed on the routed primary model so a routing change never returns
+	// another model's cached output.
 	if hit, resp, ok := s.tryCache(ctx, cacheKey); ok {
 		latency := time.Since(start)
 		log.Printf("[orchestrator] cache HIT | tenant=%s model=%s latency_ms=%d",
@@ -170,14 +163,12 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 	s.observeCacheMiss(t.ID, decision.Primary.Model)
 	log.Printf("[orchestrator] cache MISS | tenant=%s model=%s", t.ID, decision.Primary.Model)
 
-	// Budget gate. Cache hits short-circuit above so they bypass this; the
-	// gate only protects calls that will actually hit a paid provider.
+	// Cache hits return above, so only calls that reach a provider are gated.
 	reservation, err := s.reserveBudget(ctx, t.ID, decision.Primary, req.GetPrompt())
 	if err != nil {
 		return nil, err
 	}
 
-	// Primary attempt. On error, fall back if available.
 	served, result, err := s.executeWithFallback(ctx, decision, req.GetPrompt())
 	if err != nil {
 		s.settleBudget(ctx, reservation, 0)
@@ -187,9 +178,8 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 	}
 	latency := time.Since(start)
 
-	// Only cache when the primary served the response. A fallback means the
-	// primary was sick; caching its substitute under the primary key would
-	// mislead future routing.
+	// Cache only primary responses: the key names the primary model, so a
+	// cached fallback response would be served as the primary's output.
 	if served.Provider == decision.Primary.Provider && served.Model == decision.Primary.Model {
 		s.storeCache(ctx, cacheKey, result)
 	}
@@ -254,8 +244,7 @@ func (s *Service) reserveBudget(
 		log.Printf("[orchestrator] budget lookup failed (refusing paid call): %v", err)
 		return nil, status.Error(codes.Unavailable, "budget check unavailable")
 	}
-	// A zero monthly limit means "unlimited" so dev tenants pre-Phase 3 still
-	// work without surprise rejections.
+	// A zero monthly limit means unlimited.
 	if limits.MonthlyLimitUSD <= 0 {
 		return nil, nil
 	}
@@ -299,8 +288,8 @@ func (s *Service) settleBudget(ctx context.Context, res *budget.Reservation, act
 }
 
 // executeWithFallback runs decision.Primary, then decision.Fallback if the
-// primary errors. It returns the catalog entry that actually served the
-// request (so cost is computed against the right rates).
+// primary fails or is known unhealthy. It returns the entry that served the
+// request so cost uses that model's rates.
 func (s *Service) executeWithFallback(
 	ctx context.Context,
 	decision router.Decision,
@@ -421,9 +410,7 @@ func (s *Service) storeCache(ctx context.Context, key string, result *provider.I
 	}
 }
 
-// observe* helpers fan out to Prometheus when metrics is wired and no-op
-// otherwise. The nil checks live here so the call sites stay free of
-// metrics noise.
+// observe* helpers record Prometheus metrics and no-op when metrics is nil.
 func (s *Service) observeLatency(tenantID, model, provider, statusLabel string, latency time.Duration) {
 	if s.metrics == nil {
 		return
@@ -463,8 +450,7 @@ func (s *Service) recordUsage(ctx context.Context, rec usage.Record) {
 	if s.usageRepo == nil {
 		return
 	}
-	// The provider call already happened; record it even if the caller
-	// disconnected or its deadline passed.
+	// The provider call already happened; record it even if the caller is gone.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := s.usageRepo.Insert(ctx, rec); err != nil {
@@ -472,9 +458,10 @@ func (s *Service) recordUsage(ctx context.Context, rec usage.Record) {
 	}
 }
 
-// HealthCheck reports SERVING when at least one provider is healthy. It
-// answers from the background health checker when one is wired, so the
-// unauthenticated gateway /health endpoint never triggers provider calls.
+// HealthCheck reports SERVING when at least one provider is healthy. With a
+// background checker wired it answers from that, so the unauthenticated
+// gateway /health endpoint never triggers provider calls; otherwise it probes
+// each provider directly.
 func (s *Service) HealthCheck(ctx context.Context, _ *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
 	healthStatus := "NOT_SERVING"
 	if s.health != nil {

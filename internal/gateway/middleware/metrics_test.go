@@ -75,9 +75,8 @@ func TestMetricsMiddleware_DefaultStatusIs200(t *testing.T) {
 	}
 }
 
-// gatherMetric returns the text exposition format for the named metric so
-// assertions can substring-match. Avoids pulling in the full prometheus
-// testutil dependency for one test file.
+// gatherMetric renders the named metric as text for substring assertions,
+// avoiding the prometheus testutil dependency.
 func gatherMetric(t *testing.T, reg *prometheus.Registry, name string) string {
 	t.Helper()
 	mfs, err := reg.Gather()

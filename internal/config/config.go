@@ -1,4 +1,4 @@
-// Package config provides configuration loading for all services.
+// Package config loads service configuration from environment variables.
 package config
 
 import (
@@ -22,8 +22,8 @@ type GatewayConfig struct {
 	RequestTimeout time.Duration
 	// MaxRequestBytes caps request bodies (and so prompt size).
 	MaxRequestBytes int64
-	// AuthCacheTTL is how long a resolved API key is cached; it is also the
-	// longest a revoked key keeps working.
+	// AuthCacheTTL is how long a resolved API key is cached, and so how long
+	// a revoked key keeps working.
 	AuthCacheTTL time.Duration
 	// ConfigCacheTTL is how long per-tenant rate limits are cached.
 	ConfigCacheTTL time.Duration
@@ -65,7 +65,7 @@ type WorkerConfig struct {
 	InternalAuthToken    string
 }
 
-// LoadGatewayConfig reads gateway configuration from environment variables with sensible defaults.
+// LoadGatewayConfig reads gateway configuration from the environment.
 func LoadGatewayConfig() *GatewayConfig {
 	return &GatewayConfig{
 		HTTPPort:             getEnv("GATEWAY_HTTP_PORT", "8080"),
@@ -83,7 +83,7 @@ func LoadGatewayConfig() *GatewayConfig {
 	}
 }
 
-// LoadWorkerConfig reads worker configuration from environment variables with sensible defaults.
+// LoadWorkerConfig reads worker configuration from the environment.
 func LoadWorkerConfig() *WorkerConfig {
 	return &WorkerConfig{
 		OrchestratorGRPCAddr: getEnv("ORCHESTRATOR_GRPC_ADDR", "localhost:9090"),
@@ -98,7 +98,7 @@ func LoadWorkerConfig() *WorkerConfig {
 	}
 }
 
-// LoadOrchestratorConfig reads orchestrator configuration from environment variables with sensible defaults.
+// LoadOrchestratorConfig reads orchestrator configuration from the environment.
 func LoadOrchestratorConfig() *OrchestratorConfig {
 	return &OrchestratorConfig{
 		GRPCPort:          getEnv("ORCHESTRATOR_GRPC_PORT", "9090"),
@@ -128,9 +128,8 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-// getDuration and getInt refuse to start the service on a malformed value
-// (e.g. OLLAMA_TIMEOUT=30 without a unit) rather than silently falling back
-// to the default.
+// getDuration and getInt exit on a malformed value (e.g. OLLAMA_TIMEOUT=30
+// with no unit) instead of silently using the default.
 func getDuration(key string, fallback time.Duration) time.Duration {
 	val, ok := os.LookupEnv(key)
 	if !ok {

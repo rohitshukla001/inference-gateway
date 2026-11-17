@@ -12,9 +12,7 @@ import (
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
 )
 
-// stubProvider is a minimal Provider implementation that the service can
-// register under any name; it implements just enough surface for the
-// orchestrator's flow tests.
+// stubProvider is a minimal Provider that can be registered under any name.
 type stubProvider struct {
 	name  string
 	calls int64
@@ -38,9 +36,8 @@ func (s *stubProvider) Pricing(_ string) (provider.Pricing, bool) {
 	return provider.Pricing{}, true
 }
 
-// newTestService wires a Service against a single stub provider registered
-// under whichever provider name the catalog will route to. The router is
-// pinned to the default catalog so the routing path is exercised end-to-end.
+// newTestService wires a Service with one stub provider registered as
+// registerAs and the default catalog, so routing runs for real.
 func newTestService(t *testing.T, p *stubProvider, registerAs string) *Service {
 	t.Helper()
 	return NewService(Deps{

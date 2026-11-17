@@ -1,6 +1,5 @@
-// Package policy stores per-tenant routing constraints: which models a
-// tenant may use and which tier the router should pick when no explicit
-// hint is provided.
+// Package policy reads per-tenant routing constraints: allowed models and
+// the preferred tier.
 package policy
 
 import (
@@ -24,9 +23,8 @@ type Policy struct {
 	DefaultTier   string
 }
 
-// AllowsModel reports whether model is in AllowedModels. An empty
-// AllowedModels list is treated as "all models allowed", which is the
-// expected dev behaviour for a tenant that hasn't been narrowed down.
+// AllowsModel reports whether model is in AllowedModels. An empty list
+// allows all models.
 func (p *Policy) AllowsModel(model string) bool {
 	if len(p.AllowedModels) == 0 {
 		return true

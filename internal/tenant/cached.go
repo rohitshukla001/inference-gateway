@@ -15,10 +15,10 @@ type keyResolver interface {
 	GetByAPIKey(ctx context.Context, rawKey string) (*Tenant, error)
 }
 
-// CachedRepository is a Redis read-through cache in front of a Repository so
-// auth does not hit Postgres on every request. Only successful lookups are
-// cached, keyed by the key hash (never the raw key). A revoked key or a
-// deactivated tenant keeps working for at most ttl, so keep ttl short.
+// CachedRepository is a Redis read-through cache over Repository so auth
+// skips Postgres on most requests. Only successful lookups are cached, keyed
+// by the key hash, never the raw key. A revoked key or deactivated tenant
+// keeps working for up to ttl, so keep ttl short.
 type CachedRepository struct {
 	inner keyResolver
 	rds   *goredis.Client
@@ -30,9 +30,8 @@ func NewCachedRepository(inner *Repository, rds *goredis.Client, ttl time.Durati
 	return &CachedRepository{inner: inner, rds: rds, ttl: ttl}
 }
 
-// GetByAPIKey returns the cached tenant for rawKey if present, otherwise
-// resolves it from the underlying repository and primes the cache. Cache
-// failures are logged and treated as a miss.
+// GetByAPIKey returns the cached tenant for rawKey, or loads and caches it.
+// Redis errors are logged and treated as a miss.
 func (c *CachedRepository) GetByAPIKey(ctx context.Context, rawKey string) (*Tenant, error) {
 	key := "apikey:" + HashAPIKey(rawKey)
 	if raw, err := c.rds.Get(ctx, key).Bytes(); err == nil {

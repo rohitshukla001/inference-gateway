@@ -11,17 +11,14 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// SubjectAsyncRequests is the NATS subject the gateway publishes to and the
-// worker consumes from for async inference jobs.
+// SubjectAsyncRequests is the subject async inference jobs are published on.
 const SubjectAsyncRequests = "inference.async.requests"
 
-// StreamJobs is the JetStream stream that persists async job messages until
-// a worker acknowledges them.
+// StreamJobs is the JetStream stream that holds job messages until acked.
 const StreamJobs = "INFERENCE_JOBS"
 
-// ConsumerWorkers is the durable pull consumer all worker replicas share, so
-// each message is delivered to one worker at a time and redelivered if that
-// worker dies before acknowledging it.
+// ConsumerWorkers is the durable pull consumer shared by all worker replicas:
+// each message goes to one worker and is redelivered if it is not acked.
 const ConsumerWorkers = "inference-workers"
 
 // EnsureStream creates or updates the jobs stream. Work-queue retention
@@ -39,8 +36,8 @@ func EnsureStream(ctx context.Context, js jetstream.JetStream) error {
 	return nil
 }
 
-// Connect opens a connection to NATS at url and waits for the initial
-// handshake. It returns an error if the broker is unreachable.
+// Connect dials NATS at url. It fails if the broker is unreachable at
+// startup; after that it reconnects indefinitely.
 func Connect(url string) (*nats.Conn, error) {
 	nc, err := nats.Connect(
 		url,

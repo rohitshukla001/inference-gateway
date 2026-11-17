@@ -10,8 +10,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-// reader is the slice of *Repository that CachedRepository depends on.
-// Defined as an interface so tests can stub the underlying store.
+// reader is the slice of *Repository that CachedRepository uses; tests stub it.
 type reader interface {
 	GetLimits(ctx context.Context, tenantID string) (*Limits, error)
 	Reserve(ctx context.Context, tenantID string, amount, limit float64) (*Reservation, error)
@@ -19,8 +18,8 @@ type reader interface {
 }
 
 // CachedRepository is a Redis read-through cache in front of a Repository.
-// Only GetLimits is cached - Reserve and Settle change live spend and are
-// intentionally pass-through.
+// Only GetLimits is cached; Reserve and Settle change live spend and pass
+// through.
 type CachedRepository struct {
 	inner reader
 	rds   *goredis.Client
@@ -32,8 +31,8 @@ func NewCachedRepository(inner *Repository, rds *goredis.Client, ttl time.Durati
 	return &CachedRepository{inner: inner, rds: rds, ttl: ttl}
 }
 
-// GetLimits returns the cached limits for tenant if present, otherwise loads
-// from the underlying repository and primes the cache.
+// GetLimits returns cached limits, or loads them and primes the cache. Redis
+// errors are logged and treated as a miss.
 func (c *CachedRepository) GetLimits(ctx context.Context, tenantID string) (*Limits, error) {
 	key := "budget:" + tenantID
 	if raw, err := c.rds.Get(ctx, key).Bytes(); err == nil {
@@ -60,12 +59,12 @@ func (c *CachedRepository) GetLimits(ctx context.Context, tenantID string) (*Lim
 	return l, nil
 }
 
-// Reserve is forwarded directly to the underlying repository.
+// Reserve passes through to the underlying repository.
 func (c *CachedRepository) Reserve(ctx context.Context, tenantID string, amount, limit float64) (*Reservation, error) {
 	return c.inner.Reserve(ctx, tenantID, amount, limit)
 }
 
-// Settle is forwarded directly to the underlying repository.
+// Settle passes through to the underlying repository.
 func (c *CachedRepository) Settle(ctx context.Context, res *Reservation, actual float64) error {
 	return c.inner.Settle(ctx, res, actual)
 }

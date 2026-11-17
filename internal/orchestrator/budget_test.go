@@ -119,7 +119,7 @@ func TestBudget_SettlesEvenIfCallerCancelled(t *testing.T) {
 	b := &fakeBudget{limits: &budget.Limits{MonthlyLimitUSD: 10}}
 	ctx, cancel := context.WithCancel(context.Background())
 	svc := budgetService(&stubProvider{name: "mock", resp: paidResp()}, b)
-	// Cancel after reservation by settling with an already-cancelled parent.
+	// Settle with an already-cancelled parent context.
 	cancel()
 	svc.settleBudget(ctx, &budget.Reservation{Amount: 1}, 0.5)
 	if len(b.settled) != 1 {

@@ -1,5 +1,5 @@
-// Package tenant defines the tenant model, context helpers, and repository
-// abstraction for resolving tenants from API keys.
+// Package tenant defines the tenant model, context helpers, and API-key
+// lookup.
 package tenant
 
 import (
@@ -22,8 +22,7 @@ type Tenant struct {
 	CreatedAt time.Time
 }
 
-// HashAPIKey returns the lowercase hex sha256 of the raw key.
-// API keys are never stored in plaintext; only the hash is persisted.
+// HashAPIKey returns the hex sha256 of the raw key. Only the hash is stored.
 func HashAPIKey(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])

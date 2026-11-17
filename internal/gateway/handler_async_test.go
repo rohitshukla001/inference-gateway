@@ -317,8 +317,7 @@ func TestHandleJobStatus_RejectsNestedPath(t *testing.T) {
 	}
 }
 
-// confirms the response body includes the documented top-level keys
-// (caught a bug in development where omitempty hid status).
+// omitempty must not hide documented top-level keys such as status.
 func TestHandleJobStatus_ResponseShape(t *testing.T) {
 	svc := &stubJobsService{
 		getFn: func(_ context.Context, _, _ string) (*jobs.Job, error) {

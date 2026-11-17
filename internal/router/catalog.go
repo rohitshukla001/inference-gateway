@@ -1,5 +1,5 @@
-// Package router selects a provider + model for an inference request based on
-// tenant policy, cost, and latency constraints.
+// Package router selects a provider and model for a request from tenant
+// policy, cost and latency constraints.
 package router
 
 import "github.com/rshuklas/inference-gateway/internal/provider"
@@ -7,18 +7,17 @@ import "github.com/rshuklas/inference-gateway/internal/provider"
 // Tier is a coarse pricing/quality bucket for routing decisions.
 type Tier string
 
-// Built-in tiers. Tenants pick a default tier in their policy; the router
-// honours request-time hints (max_cost, latency_sla_ms) to override it.
+// Built-in tiers. A tenant's policy picks the preferred tier; request hints
+// (max_cost, latency_sla_ms) filter candidates first.
 const (
 	TierCheap   Tier = "cheap"
 	TierDefault Tier = "default"
 	TierPremium Tier = "premium"
 )
 
-// ModelEntry describes a single (provider, model) the router can select.
-// Pricing is duplicated from the provider's own Pricing() method to keep
-// route-time decisions self-contained; TestCatalogPricingMatchesProviders
-// fails if the two drift apart.
+// ModelEntry is a routable (provider, model). Pricing duplicates the
+// provider's Pricing() so routing is self-contained;
+// TestCatalogPricingMatchesProviders catches drift.
 type ModelEntry struct {
 	Provider     string
 	Model        string
@@ -27,15 +26,14 @@ type ModelEntry struct {
 	LatencyP95Ms int
 }
 
-// Catalog is an ordered list of routable models. Order matters for tie-
-// breaking when multiple models satisfy a constraint equally.
+// Catalog is an ordered list of routable models. Order breaks price ties.
 type Catalog []ModelEntry
 
-// DefaultCatalog returns the static catalog used in dev. The local Ollama
-// model is always present as a zero-cost fallback target.
+// DefaultCatalog returns the built-in static catalog. It always includes the
+// free local Ollama model as the fallback target.
 func DefaultCatalog() Catalog {
 	return Catalog{
-		// Local, free, slower. Used as the universal fallback.
+		// Local and free; the universal fallback.
 		{
 			Provider:     "ollama",
 			Model:        "llama3.2",
@@ -43,7 +41,6 @@ func DefaultCatalog() Catalog {
 			Pricing:      provider.Pricing{},
 			LatencyP95Ms: 15000,
 		},
-		// Cheap cloud-style. Default tier for most workloads.
 		{
 			Provider:     "mock",
 			Model:        "gpt-4o-mini",
@@ -51,7 +48,6 @@ func DefaultCatalog() Catalog {
 			Pricing:      provider.Pricing{InputPer1k: 0.00015, OutputPer1k: 0.0006},
 			LatencyP95Ms: 200,
 		},
-		// Premium cloud-style. Higher quality, higher cost.
 		{
 			Provider:     "mock",
 			Model:        "gpt-4o",
@@ -83,8 +79,8 @@ func (c Catalog) ByTier(tier Tier) Catalog {
 	return out
 }
 
-// FallbackOllama returns the first ollama-backed entry in the catalog, used as
-// the always-available local fallback when the primary provider fails.
+// FallbackOllama returns the first Ollama entry, the local fallback when the
+// primary fails.
 func (c Catalog) FallbackOllama() (ModelEntry, bool) {
 	for _, e := range c {
 		if e.Provider == "ollama" {

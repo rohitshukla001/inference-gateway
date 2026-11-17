@@ -10,17 +10,14 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-// reader is the slice of *Repository that CachedRepository depends on.
-// Defined as an interface so tests can stub the underlying store without
-// needing a real Postgres pool.
+// reader is the slice of *Repository that CachedRepository uses; tests stub it.
 type reader interface {
 	Get(ctx context.Context, tenantID string) (*Policy, error)
 }
 
 // CachedRepository is a Redis read-through cache in front of a Repository.
-// Cache misses fall through to Postgres and repopulate the cache. All cache
-// failures are logged and treated as a miss so a Redis blip never fails a
-// tenant lookup.
+// Cache failures are logged and treated as a miss, so a Redis blip never
+// fails a lookup.
 type CachedRepository struct {
 	inner reader
 	rds   *goredis.Client
@@ -32,8 +29,7 @@ func NewCachedRepository(inner *Repository, rds *goredis.Client, ttl time.Durati
 	return &CachedRepository{inner: inner, rds: rds, ttl: ttl}
 }
 
-// Get returns the cached policy for tenant if present, otherwise loads from
-// the underlying repository and primes the cache.
+// Get returns the cached policy, or loads it and primes the cache.
 func (c *CachedRepository) Get(ctx context.Context, tenantID string) (*Policy, error) {
 	key := "policy:" + tenantID
 	if raw, err := c.rds.Get(ctx, key).Bytes(); err == nil {

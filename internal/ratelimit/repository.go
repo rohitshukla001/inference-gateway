@@ -10,7 +10,7 @@ import (
 )
 
 // ErrNotFound is returned when a tenant has no rate-limit row. Callers treat
-// this as "no limit" so dev tenants without a row keep working.
+// it as no limit.
 var ErrNotFound = errors.New("tenant rate limit not found")
 
 // Repository reads per-tenant RPS caps from Postgres.
