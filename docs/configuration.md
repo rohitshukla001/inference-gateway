@@ -1,6 +1,6 @@
 # Configuration
 
-Every service reads its settings from environment variables. A malformed duration or integer stops the service at startup instead of falling back to the default.
+Each service reads its settings from environment variables. If a duration or an integer value is not valid, the service stops at startup. The service does not use the default value in that case.
 
 ## Environment variables
 
@@ -35,25 +35,33 @@ Every service reads its settings from environment variables. A malformed duratio
 | `SWEEP_INTERVAL` | `30s` | Worker |
 | `STUCK_JOB_THRESHOLD` | `5m` | Worker |
 
-`make run-*` sets `INTERNAL_AUTH_TOKEN` to a dev value. Set a real secret anywhere else.
+The `make run-*` commands set `INTERNAL_AUTH_TOKEN` to a value for local development. For all other environments, set a secret value.
 
-`AUTH_CACHE_TTL` is also the longest a revoked API key keeps working, because resolved keys are cached for that long.
+The gateway keeps each resolved API key in a cache for `AUTH_CACHE_TTL`. Thus, after you revoke a key, the key continues to work for a maximum of that time.
 
 ## Make commands
 
-| Command | What it does |
+| Command | Result |
 |---|---|
 | `make up` | Starts the infrastructure containers. |
-| `make down` | Stops them. |
+| `make down` | Stops the infrastructure containers. |
 | `make pull-model` | Downloads llama3.2 into Ollama. |
-| `make run-gateway` | Runs the gateway on `:8080`. |
-| `make run-orchestrator` | Runs the orchestrator on `:9090`, with the admin server on `:9091`. |
+| `make run-gateway` | Runs the gateway on port 8080. |
+| `make run-orchestrator` | Runs the orchestrator on port 9090 and the admin server on port 9091. |
 | `make run-worker` | Runs the async worker. |
-| `make build` | Builds all three binaries into `bin/`. |
-| `make test` | Runs every test, including the end-to-end tests in `test/`, which need the services running. |
-| `make test-e2e` | Sends a live health check and inference call to a running gateway. |
-| `make proto` | Regenerates the Go code from `proto/`. Needs `protoc` and the plugins from `make proto-install`. |
+| `make build` | Builds the three binaries into `bin/`. |
+| `make test` | Runs all tests. This includes the end-to-end tests in `test/`, which require the services to run. |
+| `make test-e2e` | Sends a health check and an inference request to a gateway that runs. |
+| `make proto` | Generates the Go code from `proto/` again. This command requires `protoc` and the plugins from `make proto-install`. |
 
 ## Tenants and keys
 
-The dev tenant, its key, policy, budget and rate limit are seeded by the migrations in `internal/db/migrations/`. To add a tenant or key, write a new migration. There is no admin API yet.
+The migrations in `internal/db/migrations/` add these items for the development tenant:
+
+- the tenant
+- its API key
+- its routing policy
+- its budget
+- its rate limit
+
+To add a tenant or a key, write a new migration. The gateway has no admin API.

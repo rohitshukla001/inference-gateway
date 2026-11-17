@@ -1,10 +1,12 @@
 # API reference
 
-Every endpoint except `/health` and `/metrics` needs `Authorization: Bearer <key>`. Each key belongs to one tenant, and everything below is scoped to that tenant. The local dev key `dev-key-tenant-acme` is seeded by migration `003_seed_dev_tenant.up.sql`.
+All endpoints except `/health` and `/metrics` require the header `Authorization: Bearer <key>`. Each key belongs to one tenant. Each endpoint below operates only on the data of that tenant.
+
+Migration `003_seed_dev_tenant.up.sql` adds the key `dev-key-tenant-acme` for local development.
 
 ## `POST /v1/inference/execute`
 
-Runs an inference call and waits for the answer.
+This endpoint runs an inference request and returns the answer.
 
 ```json
 {
@@ -15,19 +17,19 @@ Runs an inference call and waits for the answer.
 }
 ```
 
-Only `prompt` is required. The routing fields narrow the choice of model:
+Only `prompt` is necessary. The three routing fields limit the models that the router can select:
 
 | Field | Effect |
 |---|---|
-| `model` | Pins a model. It must be in the tenant's `allowed_models`, or the call gets `403`. |
-| `max_cost` | Keeps only models whose worst-case projected cost (USD) fits the cap. The cheapest survivor wins. |
-| `latency_sla_ms` | Keeps only models whose p95 latency fits the limit. |
+| `model` | Selects one model. If the model is not in the `allowed_models` list of the tenant, the gateway returns `403`. |
+| `max_cost` | Removes each model whose maximum projected cost in USD is more than this value. The router selects the least expensive model that remains. |
+| `latency_sla_ms` | Removes each model whose p95 latency is more than this value. |
 
-With none set, the router picks the cheapest model in the tenant's `default_tier`.
+If the request has none of these fields, the router selects the least expensive model in the `default_tier` of the tenant.
 
 ```json
 {
-  "output": "Microservices is an architectural approach...",
+  "output": "Microservices is an architectural approach that splits an application into small services.",
   "model": "gpt-4o-mini",
   "provider": "mock",
   "usage": { "prompt_tokens": 12, "completion_tokens": 45, "total_tokens": 57 },
@@ -36,39 +38,55 @@ With none set, the router picks the cheapest model in the tenant's `default_tier
 }
 ```
 
-`cached` is `true` when the answer came from the Redis cache, whose key includes the chosen model. `cost` is the USD cost of this call from token counts and the model's per-1k rates. It is `0` for cache hits and for Ollama.
+`cached` is `true` when the answer comes from the Redis cache. The cache key includes the selected model.
+
+`cost` is the cost of this request in USD. The orchestrator calculates the cost from the token counts and the per-1k rates of the model. The cost is `0` for a cache hit and for Ollama.
 
 ### Idempotency
 
-Send `Idempotency-Key: <any string>` to make a call safe to retry. Within `IDEMPOTENCY_TTL` (24 h by default):
+To make a request safe to send again, add the header `Idempotency-Key: <any string>`. The key is valid for `IDEMPOTENCY_TTL`, which is 24 hours by default. During that time, the gateway uses these rules:
 
-- a repeat after the first call succeeded returns the original response, with `Idempotent-Replay: true`.
-- a repeat while the first call is still running gets `409` and `Retry-After`.
-- the same key with a different body gets `422`.
+- If the first request succeeded, a repeat request gets the original response and the header `Idempotent-Replay: true`.
+- If the first request is not complete, a repeat request gets `409` and a `Retry-After` header.
+- If a repeat request has a different body, the repeat request gets `422`.
 
-A failed call releases its key, so the client can retry with it.
+If the first request fails, the gateway releases the key. The client can then send the request again with the same key.
 
 ### Budgets
 
-Before calling a paid model, the orchestrator reserves the call's projected cost against the tenant's monthly limit in one atomic statement, and settles it to the real cost afterwards. The projection assumes at most 512 output tokens, and that cap is sent to the provider. A call that would pass the limit gets `402`. If the budget store is unreachable, paid calls get `503`.
+Before the orchestrator sends a request to a paid model, the orchestrator reserves the projected cost against the monthly limit of the tenant. One atomic database statement does this reservation. After the request, the orchestrator changes the reservation to the actual cost.
+
+The projection uses a maximum of 512 output tokens. The orchestrator sends this maximum to the provider.
+
+If a request will make the monthly spend more than the limit, the gateway returns `402`. If the budget store is not available, the gateway returns `503` for each request to a paid model.
 
 ### Rate limits
 
-Each tenant has a requests-per-second cap in `tenant_rate_limits` (`0` means unlimited; the dev tenant has 60). Calls over it get `429` with `Retry-After` in seconds. If Redis or Postgres fails, the limiter lets calls through.
+Each tenant has a limit of requests per second in the `tenant_rate_limits` table. A value of `0` means no limit. The development tenant has a limit of 60.
+
+If a tenant sends more requests than its limit, the gateway returns `429`. The `Retry-After` header gives the wait time in seconds. If Redis or Postgres fails, the rate limiter lets all requests through.
 
 ## `POST /v1/inference/execute_async`
 
-Takes the same body as `/v1/inference/execute`, stores a pending job, publishes it to the `INFERENCE_JOBS` JetStream stream, and returns once the broker has stored the message.
+This endpoint accepts the same body as `/v1/inference/execute`. The gateway does these steps:
+
+1. The gateway stores a pending job.
+2. The gateway publishes the job to the `INFERENCE_JOBS` stream in JetStream.
+3. The gateway returns the response after the broker stores the message.
 
 ```json
 { "job_id": "9b2f3c50-1a2b-4c3d-8e9f-0123456789ab", "status": "pending" }
 ```
 
-The response is `202`. If publishing fails, the job is marked `failed` and the call gets `500`, so submit it again.
+The status code is `202`. If the publish operation fails, the gateway marks the job `failed` and returns `500`. In that case, send the request again.
 
 ## `GET /v1/jobs/{job_id}`
 
-Returns the job's state: `pending`, `running`, `completed` or `failed`. A job ID that isn't a UUID, or belongs to another tenant, gets `404`.
+This endpoint returns the job and its status: `pending`, `running`, `completed` or `failed`. The gateway returns `404` in these conditions:
+
+- The job ID is not a UUID.
+- The job does not exist.
+- The job belongs to a different tenant.
 
 ```json
 {
@@ -78,7 +96,7 @@ Returns the job's state: `pending`, `running`, `completed` or `failed`. A job ID
   "started_at": "2026-05-01T18:32:12Z",
   "completed_at": "2026-05-01T18:32:14Z",
   "result": {
-    "output": "...",
+    "output": "Microservices is an architectural approach that splits an application into small services.",
     "model": "gpt-4o-mini",
     "provider": "mock",
     "usage": { "prompt_tokens": 12, "completion_tokens": 45, "total_tokens": 57 },
@@ -88,13 +106,13 @@ Returns the job's state: `pending`, `running`, `completed` or `failed`. A job ID
 }
 ```
 
-A failed job carries `error` instead of `result`, with the same client-safe message the sync endpoint would have returned, for example `monthly budget exceeded: spent $9.9990 of $10.00, projected $0.0004 more`.
+A failed job has an `error` field instead of a `result` field. The error message is the same message that the synchronous endpoint returns. An example is `monthly budget exceeded: spent $9.9990 of $10.00, projected $0.0004 more`.
 
-A job whose worker died mid-run is marked `failed` by the sweeper after `STUCK_JOB_THRESHOLD` (5 minutes by default), so polling always reaches an end state.
+If a worker stops during a job, the sweeper marks the job `failed` after `STUCK_JOB_THRESHOLD`. The default value is 5 minutes. Thus, a client that polls a job always gets a final status.
 
 ## `GET /health`
 
-Reports the gateway and orchestrator status. No API key needed.
+This endpoint shows the status of the gateway and the orchestrator. The endpoint does not require an API key.
 
 ```json
 {
@@ -104,21 +122,21 @@ Reports the gateway and orchestrator status. No API key needed.
 }
 ```
 
-It returns `503` with `"status": "NOT_SERVING"` when the orchestrator is unreachable or has no healthy provider.
+If the orchestrator is not available, or the orchestrator has no healthy provider, the endpoint returns `503` and `"status": "NOT_SERVING"`.
 
 ## Status codes
 
-| Code | When |
+| Code | Condition |
 |---|---|
-| `400` | Missing prompt, malformed JSON, or a model that isn't in the catalog. |
-| `401` | Missing or unknown API key. |
-| `402` | The call would pass the tenant's monthly budget. |
-| `403` | The pinned model isn't in the tenant's `allowed_models`. |
-| `404` | Unknown job, or one that belongs to another tenant. |
-| `409` | The idempotency key belongs to a call that is still running. |
-| `413` | The body is larger than `MAX_REQUEST_BYTES` (1 MiB by default). |
-| `422` | The idempotency key was used with a different body. |
-| `429` | Over the tenant's rate limit. |
-| `500` | An async job couldn't be enqueued. |
-| `502` | Every provider failed, or an internal error. The message is generic. |
-| `503` | The budget store or the orchestrator is unavailable. |
+| `400` | The prompt is missing, the JSON is not valid, or the model is not in the catalog. |
+| `401` | The API key is missing or not known. |
+| `402` | The request will make the monthly spend of the tenant more than the limit. |
+| `403` | The selected model is not in the `allowed_models` list of the tenant. |
+| `404` | The job does not exist, or the job belongs to a different tenant. |
+| `409` | A request with the same idempotency key is not complete. |
+| `413` | The body is larger than `MAX_REQUEST_BYTES`, which is 1 MiB by default. |
+| `422` | The idempotency key is already in use with a different body. |
+| `429` | The tenant sent more requests than its rate limit. |
+| `500` | The gateway cannot put an async job in the queue. |
+| `502` | All providers failed, or an internal error occurred. The message does not show the internal details. |
+| `503` | The budget store or the orchestrator is not available. |
