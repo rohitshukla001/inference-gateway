@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rshuklas/inference-gateway/internal/config"
 	"github.com/rshuklas/inference-gateway/internal/db"
 	"github.com/rshuklas/inference-gateway/internal/gateway/grpcclient"
@@ -27,12 +28,15 @@ import (
 
 func main() {
 	cfg := config.LoadWorkerConfig()
+	if cfg.InternalAuthToken == "" {
+		log.Fatal("[worker] INTERNAL_AUTH_TOKEN must be set")
+	}
 
 	log.Println("[worker] starting...")
 	log.Printf("[worker] orchestrator: %s", cfg.OrchestratorGRPCAddr)
 	log.Printf("[worker] nats: %s", cfg.NATSURL)
-	log.Printf("[worker] job timeout: %s sweeper: every %s threshold %s",
-		cfg.JobTimeout, cfg.SweepInterval, cfg.StuckJobThreshold)
+	log.Printf("[worker] job timeout: %s concurrency: %d sweeper: every %s threshold %s",
+		cfg.JobTimeout, cfg.Concurrency, cfg.SweepInterval, cfg.StuckJobThreshold)
 
 	traceShutdown, err := tracing.Init(context.Background(), cfg.OTLPEndpoint, "worker", "0.6.0")
 	if err != nil {
@@ -61,11 +65,36 @@ func main() {
 	defer natsConn.Close()
 	log.Println("[worker] nats connected")
 
+	js, err := jetstream.New(natsConn)
+	if err != nil {
+		log.Fatalf("[worker] jetstream init failed: %v", err)
+	}
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer setupCancel()
+	if err := natsclient.EnsureStream(setupCtx, js); err != nil {
+		log.Fatalf("[worker] %v", err)
+	}
+	// AckWait covers a message waiting in the client buffer for a free slot
+	// (up to one job) plus its own run, so healthy jobs are never redelivered.
+	consumer, err := js.CreateOrUpdateConsumer(setupCtx, natsclient.StreamJobs, jetstream.ConsumerConfig{
+		Durable:       natsclient.ConsumerWorkers,
+		FilterSubject: natsclient.SubjectAsyncRequests,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       2*cfg.JobTimeout + 30*time.Second,
+		MaxDeliver:    5,
+	})
+	if err != nil {
+		log.Fatalf("[worker] create consumer failed: %v", err)
+	}
+
 	conn, dialErr := grpc.NewClient(
 		cfg.OrchestratorGRPCAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
-		grpc.WithUnaryInterceptor(grpcclient.TenantUnaryInterceptor()),
+		grpc.WithChainUnaryInterceptor(
+			grpcclient.InternalAuthUnaryInterceptor(cfg.InternalAuthToken),
+			grpcclient.TenantUnaryInterceptor(),
+		),
 	)
 	if dialErr != nil {
 		log.Fatalf("[worker] orchestrator dial failed: %v", dialErr)
@@ -74,7 +103,7 @@ func main() {
 	orchClient := pb.NewInferenceServiceClient(conn)
 
 	repo := jobs.NewRepository(pool)
-	w := worker.New(repo, natsConn, orchClient, cfg.JobTimeout)
+	w := worker.New(repo, consumer, orchClient, cfg.JobTimeout, cfg.Concurrency)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

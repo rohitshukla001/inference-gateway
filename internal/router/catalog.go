@@ -17,7 +17,8 @@ const (
 
 // ModelEntry describes a single (provider, model) the router can select.
 // Pricing is duplicated from the provider's own Pricing() method to keep
-// route-time decisions self-contained; the two must stay in sync.
+// route-time decisions self-contained; TestCatalogPricingMatchesProviders
+// fails if the two drift apart.
 type ModelEntry struct {
 	Provider     string
 	Model        string

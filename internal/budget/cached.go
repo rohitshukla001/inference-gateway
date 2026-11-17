@@ -14,12 +14,13 @@ import (
 // Defined as an interface so tests can stub the underlying store.
 type reader interface {
 	GetLimits(ctx context.Context, tenantID string) (*Limits, error)
-	MonthToDate(ctx context.Context, tenantID string) (float64, error)
+	Reserve(ctx context.Context, tenantID string, amount, limit float64) (*Reservation, error)
+	Settle(ctx context.Context, res *Reservation, actual float64) error
 }
 
 // CachedRepository is a Redis read-through cache in front of a Repository.
-// Only GetLimits is cached - MonthToDate is a live aggregation that must
-// reflect the latest usage_records and is intentionally pass-through.
+// Only GetLimits is cached - Reserve and Settle change live spend and are
+// intentionally pass-through.
 type CachedRepository struct {
 	inner reader
 	rds   *goredis.Client
@@ -59,8 +60,12 @@ func (c *CachedRepository) GetLimits(ctx context.Context, tenantID string) (*Lim
 	return l, nil
 }
 
-// MonthToDate is forwarded directly to the underlying repository. It is not
-// cached because spending changes per-request.
-func (c *CachedRepository) MonthToDate(ctx context.Context, tenantID string) (float64, error) {
-	return c.inner.MonthToDate(ctx, tenantID)
+// Reserve is forwarded directly to the underlying repository.
+func (c *CachedRepository) Reserve(ctx context.Context, tenantID string, amount, limit float64) (*Reservation, error) {
+	return c.inner.Reserve(ctx, tenantID, amount, limit)
+}
+
+// Settle is forwarded directly to the underlying repository.
+func (c *CachedRepository) Settle(ctx context.Context, res *Reservation, actual float64) error {
+	return c.inner.Settle(ctx, res, actual)
 }

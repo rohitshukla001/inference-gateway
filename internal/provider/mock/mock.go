@@ -70,7 +70,7 @@ func (p *Provider) Pricing(model string) (provider.Pricing, bool) {
 func (p *Provider) Execute(ctx context.Context, req *provider.InferenceRequest) (*provider.InferenceResponse, error) {
 	spec, ok := p.models[req.Model]
 	if !ok {
-		return nil, fmt.Errorf("mock: unknown model %q", req.Model)
+		return nil, provider.NonRetryable(fmt.Errorf("mock: unknown model %q", req.Model))
 	}
 	if spec.Fail {
 		return nil, errors.New("mock: simulated failure")
@@ -87,6 +87,9 @@ func (p *Provider) Execute(ctx context.Context, req *provider.InferenceRequest) 
 	output := fmt.Sprintf("[mock:%s] echo: %s", req.Model, req.Prompt)
 	promptTokens := int32(len(strings.Fields(req.Prompt)))
 	completionTokens := int32(len(strings.Fields(output)))
+	if req.MaxTokens > 0 && completionTokens > req.MaxTokens {
+		completionTokens = req.MaxTokens
+	}
 
 	return &provider.InferenceResponse{
 		Output:           output,

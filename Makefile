@@ -1,3 +1,8 @@
+# Shared secret the gateway and worker present to the orchestrator. Override
+# it outside local dev.
+INTERNAL_AUTH_TOKEN ?= dev-internal-token
+export INTERNAL_AUTH_TOKEN
+
 .PHONY: proto run-gateway run-orchestrator run-worker build up down clean test help
 
 # ---- Proto Generation ----

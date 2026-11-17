@@ -69,7 +69,9 @@ The `dev-key-tenant-acme` key is seeded automatically by migration `003_seed_dev
 
 ## Authentication
 
-The gateway uses **API key auth** via `Authorization: Bearer <key>`. Keys are stored as `sha256(key)` in Postgres, never in plaintext. Each key maps to one tenant; the resolved tenant id is propagated to the orchestrator via the gRPC metadata header `x-tenant-id`.
+The gateway uses **API key auth** via `Authorization: Bearer <key>`. Keys are stored as `sha256(key)` in Postgres, never in plaintext. Resolved keys are cached in Redis by hash for `AUTH_CACHE_TTL` (default 1m), so a revoked key keeps working for at most that long. Each key maps to one tenant; the resolved tenant id is propagated to the orchestrator via the gRPC metadata header `x-tenant-id`.
+
+**Service-to-service auth.** The orchestrator trusts `x-tenant-id`, so it only accepts calls that carry the shared secret `INTERNAL_AUTH_TOKEN` (metadata `x-internal-token`). The gateway, worker and orchestrator all refuse to start without it. `make run-*` sets a dev value; set a real secret anywhere else. gRPC reflection is off unless `GRPC_REFLECTION=true`.
 
 To add more tenants/keys, write SQL into a new migration file under `internal/db/migrations/`. An admin API is planned for a later phase.
 
@@ -80,7 +82,7 @@ The orchestrator picks a model per request via a rule-based router. The static c
 Tenants get two policy tables:
 
 - `tenant_policies` — `allowed_models` (JSONB array) and a `default_tier` (`cheap` / `default` / `premium`). The dev tenant is seeded with all three demo models allowed and tier `default`.
-- `tenant_budgets` — `monthly_limit_usd` and `soft_limit_usd`. The dev tenant has a `$10` monthly cap. Before each non-cached call, the orchestrator sums `usage_records.cost` for the current month and rejects with `402 Payment Required` if `month_to_date + projected_cost > monthly_limit`.
+- `tenant_budgets` — `monthly_limit_usd` and `soft_limit_usd`. The dev tenant has a `$10` monthly cap. Before each non-cached call to a paid model, the orchestrator atomically reserves the projected cost in `tenant_monthly_spend` and rejects with `402 Payment Required` if it would push month-to-date spend past `monthly_limit`. After the call it settles the reservation to the actual cost (zero if the call failed). Because the check and the increment are one statement, concurrent calls cannot overshoot the cap. If the budget store is unreachable, paid calls are refused with `503`. The projection assumes at most 512 output tokens, and that cap is sent to the provider.
 
 The router always pairs cloud-style providers with a 1-deep fallback to the local Ollama model. If the primary provider fails, the orchestrator transparently retries against Ollama (and tags the usage row with the actual served model).
 
@@ -132,15 +134,19 @@ If none are set, the router picks the cheapest model in the tenant's `default_ti
 
 | Header | Effect |
 |---|---|
-| `Idempotency-Key: <any-string>` | Within `IDEMPOTENCY_TTL` (default 24h), repeated calls with the same key + tenant return the original response verbatim. The replay carries `Idempotent-Replay: true`. |
+| `Idempotency-Key: <any-string>` | Within `IDEMPOTENCY_TTL` (default 24h), repeated calls with the same key + tenant return the original response verbatim. The replay carries `Idempotent-Replay: true`. A repeat that arrives while the first call is still running gets `409` with `Retry-After`; reusing a key with a different body gets `422`. Failed calls release the key so the client can retry. |
+
+Request bodies over `MAX_REQUEST_BYTES` (default 1 MiB) are rejected with `413`.
 
 **Rate limiting:**
 
-Each tenant has a per-second request cap stored in `tenant_rate_limits` (`rps`; `0` means unlimited). Requests above the cap are rejected with `429 Too Many Requests` and a `Retry-After` header in seconds. The dev tenant is seeded with `60 rps`. Both repo and Redis errors fail open so a transient infra blip does not black-hole traffic.
+Each tenant has a per-second request cap stored in `tenant_rate_limits` (`rps`; `0` means unlimited), cached in Redis for `CONFIG_CACHE_TTL`. Requests above the cap are rejected with `429 Too Many Requests` and a `Retry-After` header in seconds. The dev tenant is seeded with `60 rps`. Both repo and Redis errors fail open so a transient infra blip does not black-hole traffic.
 
 ### `POST /v1/inference/execute_async`
 
-Submit an inference request for asynchronous execution. The body is identical to `/v1/inference/execute`. The gateway persists a pending job, publishes it to NATS for the worker to pick up, and returns immediately.
+Submit an inference request for asynchronous execution. The body is identical to `/v1/inference/execute`. The gateway persists a pending job, publishes it to a NATS JetStream stream (`INFERENCE_JOBS`) for a worker to pick up, and returns once the broker has stored the message. If the publish fails, the job is marked `failed` and the request returns `500`, so resubmit.
+
+Workers share a durable consumer, run up to `WORKER_CONCURRENCY` jobs each, and acknowledge a message only after the job's result is written. A message whose worker dies is redelivered. On shutdown a worker stops pulling and lets in-flight jobs finish.
 
 **Response:** `202 Accepted`
 ```json
@@ -194,11 +200,11 @@ Poll the state of an async job. The job is scoped to the calling tenant; request
 }
 ```
 
-A worker that dies mid-job leaves the row in `running`. The sweeper inside the worker process flips orphan rows to `failed` after `STUCK_JOB_THRESHOLD` (default 5m) so polling clients eventually see closure.
+A worker that dies mid-job leaves the row in `running`, and a job whose message is dropped after repeated delivery failures leaves it in `pending`. The sweeper inside the worker process flips both kinds of orphan row to `failed` after `STUCK_JOB_THRESHOLD` (default 5m) so polling clients eventually see closure.
 
 ### `GET /health`
 
-Health check for gateway and orchestrator.
+Health check for gateway and orchestrator. Returns `503` with `"status": "NOT_SERVING"` when the orchestrator is unreachable or has no healthy provider.
 
 **Response:**
 ```json
@@ -261,11 +267,17 @@ inference-gateway/
 
 ## Configuration
 
-Environment variables with defaults:
+Environment variables with defaults. A malformed duration or integer stops the service at startup.
 
 | Variable | Default | Service |
 |----------|---------|---------|
 | `GATEWAY_HTTP_PORT` | `8080` | Gateway |
+| `INTERNAL_AUTH_TOKEN` | *(required)* | Gateway, Orchestrator, Worker |
+| `GATEWAY_REQUEST_TIMEOUT` | `120s` | Gateway |
+| `MAX_REQUEST_BYTES` | `1048576` | Gateway |
+| `AUTH_CACHE_TTL` | `1m` | Gateway |
+| `GRPC_REFLECTION` | `false` | Orchestrator |
+| `WORKER_CONCURRENCY` | `4` | Worker |
 | `ORCHESTRATOR_GRPC_ADDR` | `localhost:9090` | Gateway |
 | `ORCHESTRATOR_GRPC_PORT` | `9090` | Orchestrator |
 | `OLLAMA_ENDPOINT` | `http://localhost:11434` | Orchestrator |
@@ -276,7 +288,7 @@ Environment variables with defaults:
 | `RETRY_MAX_BACKOFF` | `2s` | Orchestrator |
 | `HEALTH_INTERVAL` | `15s` | Orchestrator |
 | `HEALTH_TIMEOUT` | `3s` | Orchestrator |
-| `CONFIG_CACHE_TTL` | `5m` | Orchestrator |
+| `CONFIG_CACHE_TTL` | `5m` | Gateway, Orchestrator |
 | `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway, Orchestrator, Worker |
 | `REDIS_URL` | `redis://localhost:6379/0` | Gateway, Orchestrator |
 | `NATS_URL` | `nats://localhost:4222` | Gateway, Worker |

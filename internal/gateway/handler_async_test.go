@@ -171,7 +171,7 @@ func TestHandleJobStatus_PendingResponse(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.HandleJobStatus(rr, newAuthedRequest(http.MethodGet,
-		"/v1/jobs/job-1", nil, &tenant.Tenant{ID: "tenant-1"}))
+		"/v1/jobs/9b2f3c50-1a2b-4c3d-8e9f-0123456789ab", nil, &tenant.Tenant{ID: "tenant-1"}))
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
@@ -186,7 +186,7 @@ func TestHandleJobStatus_PendingResponse(t *testing.T) {
 	if resp.Result != nil {
 		t.Error("expected no result for pending job")
 	}
-	if svc.lastJobID != "job-1" || svc.lastTenant != "tenant-1" {
+	if svc.lastJobID != "9b2f3c50-1a2b-4c3d-8e9f-0123456789ab" || svc.lastTenant != "tenant-1" {
 		t.Errorf("forwarded wrong key: tenant=%q job=%q", svc.lastTenant, svc.lastJobID)
 	}
 }
@@ -214,7 +214,7 @@ func TestHandleJobStatus_CompletedDecodesResult(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.HandleJobStatus(rr, newAuthedRequest(http.MethodGet,
-		"/v1/jobs/job-1", nil, &tenant.Tenant{ID: "tenant-1"}))
+		"/v1/jobs/9b2f3c50-1a2b-4c3d-8e9f-0123456789ab", nil, &tenant.Tenant{ID: "tenant-1"}))
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
@@ -249,7 +249,7 @@ func TestHandleJobStatus_FailedSurfacesError(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.HandleJobStatus(rr, newAuthedRequest(http.MethodGet,
-		"/v1/jobs/job-1", nil, &tenant.Tenant{ID: "tenant-1"}))
+		"/v1/jobs/9b2f3c50-1a2b-4c3d-8e9f-0123456789ab", nil, &tenant.Tenant{ID: "tenant-1"}))
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
@@ -273,7 +273,7 @@ func TestHandleJobStatus_NotFoundReturns404(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.HandleJobStatus(rr, newAuthedRequest(http.MethodGet,
-		"/v1/jobs/missing", nil, &tenant.Tenant{ID: "tenant-1"}))
+		"/v1/jobs/00000000-0000-0000-0000-000000000000", nil, &tenant.Tenant{ID: "tenant-1"}))
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", rr.Code)
@@ -290,7 +290,7 @@ func TestHandleJobStatus_BackendErrorReturns500(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.HandleJobStatus(rr, newAuthedRequest(http.MethodGet,
-		"/v1/jobs/job-1", nil, &tenant.Tenant{ID: "tenant-1"}))
+		"/v1/jobs/9b2f3c50-1a2b-4c3d-8e9f-0123456789ab", nil, &tenant.Tenant{ID: "tenant-1"}))
 
 	if rr.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500, got %d", rr.Code)
@@ -332,12 +332,28 @@ func TestHandleJobStatus_ResponseShape(t *testing.T) {
 	h := NewHandler(nil, svc)
 	rr := httptest.NewRecorder()
 	h.HandleJobStatus(rr, newAuthedRequest(http.MethodGet,
-		"/v1/jobs/j1", nil, &tenant.Tenant{ID: "t"}))
+		"/v1/jobs/9b2f3c50-1a2b-4c3d-8e9f-0123456789ab", nil, &tenant.Tenant{ID: "t"}))
 
 	body := rr.Body.String()
 	for _, key := range []string{`"job_id"`, `"status"`, `"created_at"`} {
 		if !strings.Contains(body, key) {
 			t.Errorf("response missing %s: %s", key, body)
 		}
+	}
+}
+
+func TestHandleJobStatus_NonUUIDReturns404WithoutLookup(t *testing.T) {
+	svc := &stubJobsService{}
+	h := NewHandler(nil, svc)
+
+	rr := httptest.NewRecorder()
+	h.HandleJobStatus(rr, newAuthedRequest(http.MethodGet,
+		"/v1/jobs/not-a-uuid", nil, &tenant.Tenant{ID: "tenant-1"}))
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rr.Code)
+	}
+	if svc.lastJobID != "" {
+		t.Errorf("expected no lookup, got one for %q", svc.lastJobID)
 	}
 }

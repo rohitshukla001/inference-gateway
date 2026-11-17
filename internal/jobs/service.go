@@ -6,15 +6,16 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rshuklas/inference-gateway/internal/messaging/natsclient"
 )
 
-// Publisher is the subset of the NATS API the jobs service needs. Defined as
+// Publisher is the subset of the JetStream API the jobs service needs.
+// Publish returns only once the broker has persisted the message. Defined as
 // an interface so tests can swap in an in-memory fake without spinning up a
 // broker.
 type Publisher interface {
-	Publish(subject string, data []byte) error
+	Publish(ctx context.Context, subject string, data []byte) error
 }
 
 // repoStore is the subset of repository operations the service needs. It
@@ -22,6 +23,7 @@ type Publisher interface {
 type repoStore interface {
 	Insert(ctx context.Context, tenantID string, requestPayload []byte) (string, error)
 	GetByID(ctx context.Context, tenantID, jobID string) (*Job, error)
+	Fail(ctx context.Context, jobID string, errMsg string) error
 }
 
 // Service is the gateway-facing facade over the jobs repository and the
@@ -47,9 +49,9 @@ type queueMessage struct {
 }
 
 // Submit inserts a new pending job and publishes a notification to the
-// worker queue. If the publish fails after the row is committed, the row
-// stays pending and the sweeper will eventually time it out; the caller
-// still gets a job_id so the API contract holds.
+// worker queue. If the publish fails, the job is marked failed and the error
+// is returned so the client can resubmit, instead of being handed a job_id
+// that no worker will ever see.
 func (s *Service) Submit(ctx context.Context, tenantID string, requestPayload []byte) (string, error) {
 	jobID, err := s.repo.Insert(ctx, tenantID, requestPayload)
 	if err != nil {
@@ -61,8 +63,11 @@ func (s *Service) Submit(ctx context.Context, tenantID string, requestPayload []
 		return "", fmt.Errorf("marshal queue message: %w", err)
 	}
 
-	if err := s.publisher.Publish(natsclient.SubjectAsyncRequests, msg); err != nil {
-		log.Printf("[jobs] publish failed for job=%s (row stays pending, sweeper will reap): %v", jobID, err)
+	if err := s.publisher.Publish(ctx, natsclient.SubjectAsyncRequests, msg); err != nil {
+		if ferr := s.repo.Fail(context.WithoutCancel(ctx), jobID, "enqueue failed"); ferr != nil {
+			log.Printf("[jobs] marking unpublished job=%s failed: %v (sweeper will reap)", jobID, ferr)
+		}
+		return "", fmt.Errorf("publish job %s: %w", jobID, err)
 	}
 
 	return jobID, nil
@@ -86,16 +91,18 @@ func DecodeQueueMessage(data []byte) (jobID, tenantID string, err error) {
 	return m.JobID, m.TenantID, nil
 }
 
-// natsPublisher adapts *nats.Conn to the Publisher interface.
-type natsPublisher struct {
-	conn *nats.Conn
+// jetStreamPublisher adapts a JetStream context to the Publisher interface.
+type jetStreamPublisher struct {
+	js jetstream.JetStream
 }
 
-// NewNATSPublisher returns a Publisher backed by a live NATS connection.
-func NewNATSPublisher(conn *nats.Conn) Publisher {
-	return &natsPublisher{conn: conn}
+// NewJetStreamPublisher returns a Publisher that waits for the broker to
+// persist each message.
+func NewJetStreamPublisher(js jetstream.JetStream) Publisher {
+	return &jetStreamPublisher{js: js}
 }
 
-func (p *natsPublisher) Publish(subject string, data []byte) error {
-	return p.conn.Publish(subject, data)
+func (p *jetStreamPublisher) Publish(ctx context.Context, subject string, data []byte) error {
+	_, err := p.js.Publish(ctx, subject, data)
+	return err
 }

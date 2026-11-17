@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rshuklas/inference-gateway/internal/config"
 	"github.com/rshuklas/inference-gateway/internal/db"
 	"github.com/rshuklas/inference-gateway/internal/gateway"
@@ -33,6 +35,9 @@ import (
 
 func main() {
 	cfg := config.LoadGatewayConfig()
+	if cfg.InternalAuthToken == "" {
+		log.Fatal("[gateway] INTERNAL_AUTH_TOKEN must be set")
+	}
 
 	log.Println("[gateway] starting...")
 	log.Printf("[gateway] connecting to orchestrator at %s", cfg.OrchestratorGRPCAddr)
@@ -67,9 +72,6 @@ func main() {
 	defer pool.Close()
 	log.Println("[gateway] postgres connected")
 
-	tenantRepo := tenant.NewRepository(pool)
-	rateLimitRepo := ratelimit.NewRepository(pool)
-
 	// Redis for idempotency replay.
 	rdsCtx, rdsCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer rdsCancel()
@@ -80,6 +82,9 @@ func main() {
 	}
 	defer rdsClient.Close()
 	log.Println("[gateway] redis connected")
+
+	tenantRepo := tenant.NewCachedRepository(tenant.NewRepository(pool), rdsClient, cfg.AuthCacheTTL)
+	rateLimitRepo := ratelimit.NewCachedRepository(ratelimit.NewRepository(pool), rdsClient, cfg.ConfigCacheTTL)
 
 	// NATS for async job queue. If the broker is down at startup we still
 	// boot - the sync path stays healthy and the async endpoint reports 503.
@@ -93,8 +98,11 @@ func main() {
 
 	var jobsSvc gateway.JobsService
 	if natsConn != nil {
-		jobsRepo := jobs.NewRepository(pool)
-		jobsSvc = jobs.NewService(jobsRepo, jobs.NewNATSPublisher(natsConn))
+		if js, err := initJetStream(natsConn); err != nil {
+			log.Printf("[gateway] jetstream setup failed (async disabled): %v", err)
+		} else {
+			jobsSvc = jobs.NewService(jobs.NewRepository(pool), jobs.NewJetStreamPublisher(js))
+		}
 	}
 
 	// gRPC client to orchestrator with tenant-propagating + tracing
@@ -104,7 +112,10 @@ func main() {
 		cfg.OrchestratorGRPCAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
-		grpc.WithUnaryInterceptor(grpcclient.TenantUnaryInterceptor()),
+		grpc.WithChainUnaryInterceptor(
+			grpcclient.InternalAuthUnaryInterceptor(cfg.InternalAuthToken),
+			grpcclient.TenantUnaryInterceptor(),
+		),
 	)
 	if err != nil {
 		log.Fatalf("[gateway] failed to connect to orchestrator: %v", err)
@@ -112,7 +123,7 @@ func main() {
 	defer conn.Close()
 
 	client := pb.NewInferenceServiceClient(conn)
-	handler := gateway.NewHandler(client, jobsSvc)
+	handler := gateway.NewHandler(client, jobsSvc).WithRequestTimeout(cfg.RequestTimeout)
 
 	mtr := metrics.New()
 
@@ -120,6 +131,7 @@ func main() {
 	rateLimitMW := middleware.RateLimit(rateLimitRepo, ratelimit.New(rdsClient))
 	idempotencyMW := middleware.Idempotency(rdsClient, cfg.IdempotencyTTL)
 	metricsMW := middleware.Metrics(mtr, nil)
+	bodyMW := middleware.MaxBody(cfg.MaxRequestBytes)
 
 	mux := http.NewServeMux()
 	// Health and /metrics are intentionally unauthenticated.
@@ -129,11 +141,11 @@ func main() {
 	// ctx, idempotency reads it.
 	mux.Handle(
 		"/v1/inference/execute",
-		metricsMW(authMW(rateLimitMW(idempotencyMW(http.HandlerFunc(handler.HandleExecute))))),
+		metricsMW(authMW(rateLimitMW(bodyMW(idempotencyMW(http.HandlerFunc(handler.HandleExecute)))))),
 	)
 	mux.Handle(
 		"/v1/inference/execute_async",
-		metricsMW(authMW(rateLimitMW(http.HandlerFunc(handler.HandleSubmitAsync)))),
+		metricsMW(authMW(rateLimitMW(bodyMW(http.HandlerFunc(handler.HandleSubmitAsync))))),
 	)
 	mux.Handle(
 		"/v1/jobs/",
@@ -142,20 +154,50 @@ func main() {
 
 	addr := fmt.Sprintf(":%s", cfg.HTTPPort)
 	tracedHandler := otelhttp.NewHandler(mux, "gateway", otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents))
-	server := &http.Server{Addr: addr, Handler: tracedHandler}
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           tracedHandler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		// Must outlast the slowest inference call.
+		WriteTimeout: cfg.RequestTimeout + 10*time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
 
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("[gateway] shutting down...")
-		server.Close()
+		log.Println("[gateway] shutting down, draining in-flight requests...")
+		// Give in-flight inference calls up to their full deadline to finish.
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout+5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("[gateway] shutdown incomplete: %v", err)
+		}
 	}()
 
 	log.Printf("[gateway] listening on %s", addr)
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("[gateway] server error: %v", err)
 	}
+	<-shutdownDone
 
 	log.Println("[gateway] stopped")
+}
+
+// initJetStream returns a JetStream context with the jobs stream in place.
+func initJetStream(nc *nats.Conn) (jetstream.JetStream, error) {
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := natsclient.EnsureStream(ctx, js); err != nil {
+		return nil, err
+	}
+	return js, nil
 }

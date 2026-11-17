@@ -122,16 +122,19 @@ func (r *Repository) Fail(ctx context.Context, jobID string, errMsg string) erro
 const sweepStaleSQL = `
 UPDATE jobs
 SET status = 'failed',
-    error_message = COALESCE(error_message, '') || 'sweeper: stuck in running for ' || $2,
+    error_message = COALESCE(error_message, '') || 'sweeper: stuck in ' || status || ' for ' || $2,
     completed_at = NOW()
-WHERE status = 'running'
-  AND started_at < NOW() - $1::interval
+WHERE (status = 'running' AND started_at < NOW() - $1::interval)
+   OR (status = 'pending' AND created_at < NOW() - $1::interval)
 RETURNING job_id
 `
 
-// SweepStale marks any running job whose worker has been silent for longer
-// than threshold as failed. Safe to run from multiple workers because the
-// UPDATE is set-based.
+// SweepStale marks jobs that have stalled for longer than threshold as
+// failed: running jobs whose worker went silent, and pending jobs no worker
+// ever claimed (the NATS publish failed, or core NATS dropped the message
+// because no worker was subscribed). A worker that receives a message for a
+// swept job fails its Claim and skips it. Safe to run from multiple workers
+// because the UPDATE is set-based.
 func (r *Repository) SweepStale(ctx context.Context, threshold time.Duration) (int, error) {
 	rows, err := r.pool.Query(ctx, sweepStaleSQL, threshold.String(), threshold.String())
 	if err != nil {

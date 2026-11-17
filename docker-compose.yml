@@ -5,7 +5,7 @@ services:
     image: ollama/ollama:latest
     container_name: ig-ollama
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
@@ -18,7 +18,7 @@ services:
       POSTGRES_PASSWORD: inference
       POSTGRES_DB: inference_gateway
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -27,16 +27,19 @@ services:
     image: redis:7-alpine
     container_name: ig-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     restart: unless-stopped
 
   nats:
     image: nats:2.10-alpine
     container_name: ig-nats
     ports:
-      - "4222:4222"   # client
-      - "8222:8222"   # monitoring
-    command: ["-m", "8222"]
+      - "127.0.0.1:4222:4222"   # client
+      - "127.0.0.1:8222:8222"   # monitoring
+    # -js enables JetStream so async jobs survive until a worker acks them.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes:
+      - nats_data:/data
     restart: unless-stopped
 
   # ---- Observability ----
@@ -45,7 +48,7 @@ services:
     image: prom/prometheus:v2.55.0
     container_name: ig-prometheus
     ports:
-      - "9094:9090"   # 9090 is taken on the host by the orchestrator gRPC
+      - "127.0.0.1:9094:9090"   # 9090 is taken on the host by the orchestrator gRPC
     volumes:
       - ./deployments/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     extra_hosts:
@@ -56,7 +59,7 @@ services:
     image: grafana/grafana:11.3.0
     container_name: ig-grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
@@ -73,9 +76,9 @@ services:
     image: jaegertracing/all-in-one:1.60
     container_name: ig-jaeger
     ports:
-      - "16686:16686"  # UI
-      - "4317:4317"    # OTLP gRPC
-      - "4318:4318"    # OTLP HTTP
+      - "127.0.0.1:16686:16686"  # UI
+      - "127.0.0.1:4317:4317"    # OTLP gRPC
+      - "127.0.0.1:4318:4318"    # OTLP HTTP
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     restart: unless-stopped
@@ -84,3 +87,4 @@ volumes:
   ollama_data:
   pg_data:
   grafana_data:
+  nats_data:

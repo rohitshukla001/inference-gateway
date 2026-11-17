@@ -1,12 +1,12 @@
-// Package budget reads tenant spend caps and aggregates month-to-date
-// usage cost so the orchestrator can gate calls before they reach a paid
-// provider.
+// Package budget reads tenant spend caps and reserves month-to-date spend
+// so the orchestrator can gate calls before they reach a paid provider.
 package budget
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,6 +16,20 @@ import (
 // this as "no limit" so dev tenants without a row keep working.
 var ErrNotFound = errors.New("tenant budget not found")
 
+// ErrOverBudget means the call's projected cost does not fit in the
+// tenant's remaining monthly budget.
+var ErrOverBudget = errors.New("monthly budget exceeded")
+
+// OverBudgetError is ErrOverBudget with the tenant's month-to-date spend.
+type OverBudgetError struct {
+	SpentUSD float64
+}
+
+func (e *OverBudgetError) Error() string { return ErrOverBudget.Error() }
+
+// Unwrap lets errors.Is(err, ErrOverBudget) match.
+func (e *OverBudgetError) Unwrap() error { return ErrOverBudget }
+
 // Limits is a tenant's monthly spending caps.
 type Limits struct {
 	TenantID        string
@@ -23,7 +37,7 @@ type Limits struct {
 	SoftLimitUSD    float64
 }
 
-// Repository reads budgets and aggregates month-to-date usage.
+// Repository reads budgets and maintains month-to-date spend.
 type Repository struct {
 	pool *pgxpool.Pool
 }
@@ -56,20 +70,71 @@ func (r *Repository) GetLimits(ctx context.Context, tenantID string) (*Limits, e
 	return &l, nil
 }
 
-const monthToDateSQL = `
-SELECT COALESCE(SUM(cost), 0)
-FROM usage_records
-WHERE tenant_id = $1
-  AND created_at >= date_trunc('month', NOW())
+// Reservation is a projected cost held against a tenant's monthly spend.
+// Settle it exactly once with the call's actual cost.
+type Reservation struct {
+	TenantID string
+	Month    time.Time
+	Amount   float64
+	// SpentUSD is the month-to-date spend including this reservation.
+	SpentUSD float64
+}
+
+const reserveSQL = `
+INSERT INTO tenant_monthly_spend AS s (tenant_id, month, spent_usd)
+VALUES ($1, date_trunc('month', NOW())::date, $2)
+ON CONFLICT (tenant_id, month) DO UPDATE
+SET spent_usd = s.spent_usd + EXCLUDED.spent_usd
+WHERE s.spent_usd + EXCLUDED.spent_usd <= $3
+RETURNING month, spent_usd
 `
 
-// MonthToDate returns the sum of usage_records.cost for tenant since the
-// start of the current calendar month (server clock).
-func (r *Repository) MonthToDate(ctx context.Context, tenantID string) (float64, error) {
-	var spent float64
-	err := r.pool.QueryRow(ctx, monthToDateSQL, tenantID).Scan(&spent)
-	if err != nil {
-		return 0, fmt.Errorf("month-to-date spend: %w", err)
+const monthToDateSQL = `
+SELECT COALESCE(
+    (SELECT spent_usd FROM tenant_monthly_spend
+     WHERE tenant_id = $1 AND month = date_trunc('month', NOW())::date),
+    0)
+`
+
+// Reserve atomically adds amount to the tenant's current-month spend if the
+// result stays within limit. It returns ErrOverBudget (with the current
+// spend) when it would not. The check and the increment are one statement,
+// so concurrent callers cannot both pass on the same headroom.
+func (r *Repository) Reserve(ctx context.Context, tenantID string, amount, limit float64) (*Reservation, error) {
+	if amount > limit {
+		return nil, r.overBudget(ctx, tenantID)
 	}
-	return spent, nil
+	res := Reservation{TenantID: tenantID, Amount: amount}
+	err := r.pool.QueryRow(ctx, reserveSQL, tenantID, amount, limit).Scan(&res.Month, &res.SpentUSD)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, r.overBudget(ctx, tenantID)
+		}
+		return nil, fmt.Errorf("reserve budget: %w", err)
+	}
+	return &res, nil
+}
+
+func (r *Repository) overBudget(ctx context.Context, tenantID string) error {
+	var spent float64
+	if err := r.pool.QueryRow(ctx, monthToDateSQL, tenantID).Scan(&spent); err != nil {
+		return fmt.Errorf("%w (month-to-date unavailable: %v)", ErrOverBudget, err)
+	}
+	return &OverBudgetError{SpentUSD: spent}
+}
+
+const settleSQL = `
+UPDATE tenant_monthly_spend
+SET spent_usd = spent_usd + $3
+WHERE tenant_id = $1 AND month = $2
+`
+
+// Settle replaces a reservation's projected amount with the actual cost
+// (zero if the call failed). It adjusts the month the reservation was made
+// in, even if the call finished after a month boundary.
+func (r *Repository) Settle(ctx context.Context, res *Reservation, actual float64) error {
+	if _, err := r.pool.Exec(ctx, settleSQL, res.TenantID, res.Month, actual-res.Amount); err != nil {
+		return fmt.Errorf("settle budget: %w", err)
+	}
+	return nil
 }

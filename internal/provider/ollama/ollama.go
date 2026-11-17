@@ -15,9 +15,14 @@ import (
 
 // ollamaGenerateRequest is the payload sent to Ollama's /api/generate endpoint.
 type ollamaGenerateRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
+	Model   string         `json:"model"`
+	Prompt  string         `json:"prompt"`
+	Stream  bool           `json:"stream"`
+	Options *ollamaOptions `json:"options,omitempty"`
+}
+
+type ollamaOptions struct {
+	NumPredict int32 `json:"num_predict,omitempty"`
 }
 
 // ollamaGenerateResponse is the response from Ollama's /api/generate endpoint.
@@ -66,6 +71,9 @@ func (o *OllamaProvider) Execute(ctx context.Context, req *provider.InferenceReq
 		Prompt: req.Prompt,
 		Stream: false, // Non-streaming for Phase 1
 	}
+	if req.MaxTokens > 0 {
+		ollamaReq.Options = &ollamaOptions{NumPredict: req.MaxTokens}
+	}
 
 	body, err := json.Marshal(ollamaReq)
 	if err != nil {
@@ -85,8 +93,14 @@ func (o *OllamaProvider) Execute(ctx context.Context, req *provider.InferenceReq
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(respBody))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		err := fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(respBody))
+		// 4xx (other than 429) means the request itself is wrong, e.g. the
+		// model is not pulled; retrying will not help.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return nil, provider.NonRetryable(err)
+		}
+		return nil, err
 	}
 
 	var ollamaResp ollamaGenerateResponse

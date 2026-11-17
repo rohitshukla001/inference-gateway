@@ -45,10 +45,11 @@ type PolicyReader interface {
 }
 
 // BudgetReader is the slice of budget.Repository the service needs. GetLimits
-// is cache-friendly; MonthToDate must always reflect live usage.
+// is cache-friendly; Reserve and Settle change live spend.
 type BudgetReader interface {
 	GetLimits(ctx context.Context, tenantID string) (*budget.Limits, error)
-	MonthToDate(ctx context.Context, tenantID string) (float64, error)
+	Reserve(ctx context.Context, tenantID string, amount, limit float64) (*budget.Reservation, error)
+	Settle(ctx context.Context, res *budget.Reservation, actual float64) error
 }
 
 // Service implements the gRPC InferenceService.
@@ -171,13 +172,15 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 
 	// Budget gate. Cache hits short-circuit above so they bypass this; the
 	// gate only protects calls that will actually hit a paid provider.
-	if err := s.checkBudget(ctx, t.ID, decision.Primary, req.GetPrompt()); err != nil {
+	reservation, err := s.reserveBudget(ctx, t.ID, decision.Primary, req.GetPrompt())
+	if err != nil {
 		return nil, err
 	}
 
 	// Primary attempt. On error, fall back if available.
 	served, result, err := s.executeWithFallback(ctx, decision, req.GetPrompt())
 	if err != nil {
+		s.settleBudget(ctx, reservation, 0)
 		s.observeLatency(t.ID, decision.Primary.Model, decision.Primary.Provider, "error", time.Since(start))
 		log.Printf("[orchestrator] all providers failed: %v", err)
 		return nil, status.Error(codes.Internal, fmt.Sprintf("provider execution failed: %v", err))
@@ -192,6 +195,7 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 	}
 
 	cost := served.Pricing.Cost(result.PromptTokens, result.CompletionTokens)
+	s.settleBudget(ctx, reservation, cost)
 
 	s.observeLatency(t.ID, result.Model, result.Provider, "ok", latency)
 	s.observeCost(t.ID, result.Model, result.Provider, cost)
@@ -224,52 +228,74 @@ func (s *Service) ExecuteInference(ctx context.Context, req *pb.ExecuteInference
 	}, nil
 }
 
-// checkBudget rejects with ResourceExhausted if the projected cost of this
-// call would push month-to-date spend past the tenant's monthly limit.
-// Tenants without a budget row pass through unchecked.
-func (s *Service) checkBudget(
+// reserveBudget holds the projected cost of this call against the tenant's
+// monthly limit, rejecting with ResourceExhausted if it does not fit. It
+// returns a nil reservation when no gate applies: free models, tenants
+// without a budget row, or a zero ("unlimited") limit. If the budget store
+// is unreachable, paid calls are refused rather than let through uncapped.
+func (s *Service) reserveBudget(
 	ctx context.Context,
 	tenantID string,
 	primary router.ModelEntry,
 	prompt string,
-) error {
+) (*budget.Reservation, error) {
 	if s.budgetRepo == nil {
-		return nil
+		return nil, nil
+	}
+	projected := router.EstimateCost(prompt, primary.Pricing)
+	if projected <= 0 {
+		return nil, nil
 	}
 	limits, err := s.budgetRepo.GetLimits(ctx, tenantID)
 	if err != nil {
 		if errors.Is(err, budget.ErrNotFound) {
-			return nil
+			return nil, nil
 		}
-		log.Printf("[orchestrator] budget lookup failed (allowing call): %v", err)
-		return nil
+		log.Printf("[orchestrator] budget lookup failed (refusing paid call): %v", err)
+		return nil, status.Error(codes.Unavailable, "budget check unavailable")
 	}
 	// A zero monthly limit means "unlimited" so dev tenants pre-Phase 3 still
 	// work without surprise rejections.
 	if limits.MonthlyLimitUSD <= 0 {
-		return nil
+		return nil, nil
 	}
 
-	projected := router.EstimateCost(prompt, primary.Pricing)
-	mtd, err := s.budgetRepo.MonthToDate(ctx, tenantID)
+	res, err := s.budgetRepo.Reserve(ctx, tenantID, projected, limits.MonthlyLimitUSD)
 	if err != nil {
-		log.Printf("[orchestrator] month-to-date lookup failed (allowing call): %v", err)
-		return nil
+		var over *budget.OverBudgetError
+		if errors.As(err, &over) {
+			log.Printf("[orchestrator] budget BLOCK | tenant=%s mtd=%.4f projected=%.4f limit=%.4f",
+				tenantID, over.SpentUSD, projected, limits.MonthlyLimitUSD)
+			return nil, status.Errorf(codes.ResourceExhausted,
+				"monthly budget exceeded: spent $%.4f of $%.2f, projected $%.4f more",
+				over.SpentUSD, limits.MonthlyLimitUSD, projected)
+		}
+		if errors.Is(err, budget.ErrOverBudget) {
+			return nil, status.Error(codes.ResourceExhausted, "monthly budget exceeded")
+		}
+		log.Printf("[orchestrator] budget reserve failed (refusing paid call): %v", err)
+		return nil, status.Error(codes.Unavailable, "budget check unavailable")
 	}
 
-	if mtd+projected > limits.MonthlyLimitUSD {
-		log.Printf("[orchestrator] budget BLOCK | tenant=%s mtd=%.4f projected=%.4f limit=%.4f",
-			tenantID, mtd, projected, limits.MonthlyLimitUSD)
-		return status.Errorf(codes.ResourceExhausted,
-			"monthly budget exceeded: spent $%.4f of $%.2f, projected $%.4f more",
-			mtd, limits.MonthlyLimitUSD, projected)
+	if limits.SoftLimitUSD > 0 && res.SpentUSD > limits.SoftLimitUSD {
+		log.Printf("[orchestrator] budget WARN | tenant=%s mtd=%.4f soft=%.4f",
+			tenantID, res.SpentUSD, limits.SoftLimitUSD)
 	}
+	return res, nil
+}
 
-	if limits.SoftLimitUSD > 0 && mtd+projected > limits.SoftLimitUSD {
-		log.Printf("[orchestrator] budget WARN | tenant=%s mtd=%.4f projected=%.4f soft=%.4f",
-			tenantID, mtd, projected, limits.SoftLimitUSD)
+// settleBudget swaps a reservation's projected amount for the actual cost.
+// It runs even if the caller has gone away, so spend stays accurate.
+func (s *Service) settleBudget(ctx context.Context, res *budget.Reservation, actual float64) {
+	if res == nil {
+		return
 	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.budgetRepo.Settle(ctx, res, actual); err != nil {
+		log.Printf("[orchestrator] budget settle failed | tenant=%s reserved=%.6f actual=%.6f: %v",
+			res.TenantID, res.Amount, actual, err)
+	}
 }
 
 // executeWithFallback runs decision.Primary, then decision.Fallback if the
@@ -295,8 +321,9 @@ func (s *Service) executeWithFallback(
 			decision.Primary.Provider)
 	} else if ok {
 		result, err := s.executeWithRetry(ctx, primaryProv, &provider.InferenceRequest{
-			Prompt: prompt,
-			Model:  decision.Primary.Model,
+			Prompt:    prompt,
+			Model:     decision.Primary.Model,
+			MaxTokens: router.MaxOutputTokens,
 		})
 		if err == nil {
 			return decision.Primary, result, nil
@@ -320,8 +347,9 @@ func (s *Service) executeWithFallback(
 
 	log.Printf("[orchestrator] fallback to %s/%s", decision.Fallback.Provider, decision.Fallback.Model)
 	result, err := s.executeWithRetry(ctx, fbProv, &provider.InferenceRequest{
-		Prompt: prompt,
-		Model:  decision.Fallback.Model,
+		Prompt:    prompt,
+		Model:     decision.Fallback.Model,
+		MaxTokens: router.MaxOutputTokens,
 	})
 	if err != nil {
 		s.observeProviderFailure(decision.Fallback.Provider, decision.Fallback.Model)
@@ -435,14 +463,29 @@ func (s *Service) recordUsage(ctx context.Context, rec usage.Record) {
 	if s.usageRepo == nil {
 		return
 	}
+	// The provider call already happened; record it even if the caller
+	// disconnected or its deadline passed.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	if err := s.usageRepo.Insert(ctx, rec); err != nil {
 		log.Printf("[orchestrator] usage insert failed (non-fatal): %v", err)
 	}
 }
 
-// HealthCheck reports SERVING when at least one provider is reachable.
+// HealthCheck reports SERVING when at least one provider is healthy. It
+// answers from the background health checker when one is wired, so the
+// unauthenticated gateway /health endpoint never triggers provider calls.
 func (s *Service) HealthCheck(ctx context.Context, _ *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
 	healthStatus := "NOT_SERVING"
+	if s.health != nil {
+		for name := range s.providers {
+			if s.health.IsHealthy(name) {
+				healthStatus = "SERVING"
+				break
+			}
+		}
+		return &pb.HealthCheckResponse{Status: healthStatus, Service: "orchestrator", Version: serviceVersion}, nil
+	}
 	for name, p := range s.providers {
 		if err := p.HealthCheck(ctx); err == nil {
 			healthStatus = "SERVING"

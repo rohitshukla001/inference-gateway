@@ -207,3 +207,27 @@ func TestExecuteInference_BothFail_ReturnsInternal(t *testing.T) {
 		t.Fatal("expected error when both primary and fallback fail")
 	}
 }
+
+func TestHealthCheck_UsesHealthCheckerWhenWired(t *testing.T) {
+	p := &stubProvider{name: "ollama"}
+	for name, unhealthy := range map[string]bool{"healthy": false, "unhealthy": true} {
+		t.Run(name, func(t *testing.T) {
+			svc := NewService(Deps{
+				Providers: map[string]provider.Provider{"ollama": p},
+				Router:    router.New(router.DefaultCatalog()),
+				Health:    &stubHealth{unhealthy: map[string]bool{"ollama": unhealthy}},
+			})
+			resp, err := svc.HealthCheck(context.Background(), &pb.HealthCheckRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "SERVING"
+			if unhealthy {
+				want = "NOT_SERVING"
+			}
+			if resp.GetStatus() != want {
+				t.Errorf("status = %q, want %q", resp.GetStatus(), want)
+			}
+		})
+	}
+}

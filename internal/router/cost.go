@@ -7,9 +7,10 @@ const (
 	// token estimates without running a real tokenizer.
 	charsPerToken = 4
 
-	// defaultMaxOutputTokens is the worst-case completion length assumed when
-	// projecting cost for a budget gate. Real responses are usually smaller.
-	defaultMaxOutputTokens = 512
+	// MaxOutputTokens is the completion cap sent to providers and the
+	// worst-case length assumed when projecting cost for the budget gate, so
+	// a call can never cost more than its projection on output.
+	MaxOutputTokens = 512
 )
 
 // EstimateTokens approximates token count from raw character length. It is
@@ -28,8 +29,8 @@ func EstimateTokens(text string) int32 {
 
 // EstimateCost returns a worst-case projection for the given prompt against
 // the supplied pricing, assuming the model emits up to
-// defaultMaxOutputTokens of output. Used to gate requests against a remaining
+// MaxOutputTokens of output. Used to gate requests against a remaining
 // budget; deliberately conservative.
 func EstimateCost(prompt string, pricing provider.Pricing) float64 {
-	return pricing.Cost(EstimateTokens(prompt), defaultMaxOutputTokens)
+	return pricing.Cost(EstimateTokens(prompt), MaxOutputTokens)
 }

@@ -14,6 +14,12 @@ type stubRepo struct {
 	getByID   *Job
 	getByErr  error
 	insertHit int
+	failedIDs []string
+}
+
+func (s *stubRepo) Fail(_ context.Context, jobID, _ string) error {
+	s.failedIDs = append(s.failedIDs, jobID)
+	return nil
 }
 
 func (s *stubRepo) Insert(ctx context.Context, tenantID string, payload []byte) (string, error) {
@@ -38,7 +44,7 @@ type stubPublisher struct {
 	calls   int
 }
 
-func (p *stubPublisher) Publish(subject string, data []byte) error {
+func (p *stubPublisher) Publish(_ context.Context, subject string, data []byte) error {
 	p.calls++
 	p.subject = subject
 	p.data = data
@@ -76,17 +82,16 @@ func TestService_Submit_InsertsAndPublishes(t *testing.T) {
 	}
 }
 
-func TestService_Submit_PublishFailureReturnsJobIDAnyway(t *testing.T) {
+func TestService_Submit_PublishFailureFailsJobAndErrors(t *testing.T) {
 	repo := &stubRepo{}
 	pub := &stubPublisher{err: errors.New("nats down")}
 	svc := NewService(repo, pub)
 
-	jobID, err := svc.Submit(context.Background(), "tenant-1", []byte(`{}`))
-	if err != nil {
-		t.Fatalf("submit should not fail when publish fails: %v", err)
+	if _, err := svc.Submit(context.Background(), "tenant-1", []byte(`{}`)); err == nil {
+		t.Fatal("expected submit to fail when publish fails")
 	}
-	if jobID != "job-1" {
-		t.Errorf("expected job-1, got %q", jobID)
+	if len(repo.failedIDs) != 1 || repo.failedIDs[0] != "job-1" {
+		t.Errorf("expected job-1 marked failed, got %v", repo.failedIDs)
 	}
 }
 

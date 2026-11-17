@@ -34,7 +34,8 @@ type Decision struct {
 
 // Allow checks the current second's bucket for tenantID against rps. An rps
 // of 0 means unlimited and always returns Allowed=true. The bucket key has a
-// 2-second TTL so old buckets evict on their own.
+// 2-second TTL, set atomically with the increment, so old buckets evict on
+// their own.
 func (l *Limiter) Allow(ctx context.Context, tenantID string, rps int) (Decision, error) {
 	if rps <= 0 {
 		return Decision{Allowed: true}, nil
@@ -44,15 +45,15 @@ func (l *Limiter) Allow(ctx context.Context, tenantID string, rps int) (Decision
 	bucket := now.Unix()
 	key := fmt.Sprintf("rl:%s:%d", tenantID, bucket)
 
-	count, err := l.rds.Incr(ctx, key).Result()
-	if err != nil {
+	// INCR and EXPIRE run in one MULTI/EXEC so a bucket can never be left
+	// without a TTL.
+	pipe := l.rds.TxPipeline()
+	incr := pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, 2*time.Second)
+	if _, err := pipe.Exec(ctx); err != nil {
 		return Decision{}, fmt.Errorf("ratelimit incr: %w", err)
 	}
-	if count == 1 {
-		if err := l.rds.Expire(ctx, key, 2*time.Second).Err(); err != nil {
-			return Decision{}, fmt.Errorf("ratelimit expire: %w", err)
-		}
-	}
+	count := incr.Val()
 
 	if count > int64(rps) {
 		retry := max(time.Until(time.Unix(bucket+1, 0)), 0)

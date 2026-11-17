@@ -127,3 +127,20 @@ func (f *flakyProvider) Execute(_ context.Context, _ *provider.InferenceRequest)
 
 func (f *flakyProvider) HealthCheck(_ context.Context) error              { return nil }
 func (f *flakyProvider) Pricing(_ string) (provider.Pricing, bool)        { return provider.Pricing{}, true }
+func TestExecuteWithRetry_StopsOnNonRetryableError(t *testing.T) {
+	for name, err := range map[string]error{
+		"marked non-retryable": provider.NonRetryable(errors.New("bad request")),
+		"timeout":              context.DeadlineExceeded,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := &stubProvider{name: "ollama", err: err}
+			svc := &Service{retry: RetryConfig{MaxAttempts: 3, BaseBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond}}
+			if _, gotErr := svc.executeWithRetry(context.Background(), p, &provider.InferenceRequest{Prompt: "hi"}); gotErr == nil {
+				t.Fatal("expected error")
+			}
+			if got := atomic.LoadInt64(&p.calls); got != 1 {
+				t.Errorf("expected 1 call, got %d", got)
+			}
+		})
+	}
+}

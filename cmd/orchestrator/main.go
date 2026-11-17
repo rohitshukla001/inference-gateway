@@ -37,6 +37,9 @@ import (
 
 func main() {
 	cfg := config.LoadOrchestratorConfig()
+	if cfg.InternalAuthToken == "" {
+		log.Fatal("[orchestrator] INTERNAL_AUTH_TOKEN must be set")
+	}
 
 	log.Println("[orchestrator] starting...")
 	log.Printf("[orchestrator] ollama endpoint: %s", cfg.OllamaEndpoint)
@@ -116,15 +119,21 @@ func main() {
 		Health: healthChecker,
 	})
 
-	// gRPC server with tenant + tracing interceptors. The otelgrpc handler
-	// has to come first so the tenant interceptor sees a span-bearing
-	// context.
+	// gRPC server with auth + tenant + tracing interceptors. The otelgrpc
+	// handler has to come first so the interceptors see a span-bearing
+	// context. Internal auth runs before tenant extraction so x-tenant-id
+	// is only trusted from authenticated callers.
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.UnaryInterceptor(grpcserver.TenantUnaryInterceptor()),
+		grpc.ChainUnaryInterceptor(
+			grpcserver.InternalAuthUnaryInterceptor(cfg.InternalAuthToken),
+			grpcserver.TenantUnaryInterceptor(),
+		),
 	)
 	pb.RegisterInferenceServiceServer(grpcServer, svc)
-	reflection.Register(grpcServer)
+	if cfg.EnableReflection {
+		reflection.Register(grpcServer)
+	}
 
 	addr := fmt.Sprintf(":%s", cfg.GRPCPort)
 	lis, err := net.Listen("tcp", addr)

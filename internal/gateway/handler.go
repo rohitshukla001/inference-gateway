@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rshuklas/inference-gateway/internal/jobs"
 	"github.com/rshuklas/inference-gateway/internal/tenant"
 	pb "github.com/rshuklas/inference-gateway/proto/inference/v1"
@@ -25,10 +26,14 @@ type JobsService interface {
 	Get(ctx context.Context, tenantID, jobID string) (*jobs.Job, error)
 }
 
+// defaultRequestTimeout bounds a sync inference call when none is configured.
+const defaultRequestTimeout = 120 * time.Second
+
 // Handler holds the HTTP handlers for the gateway API.
 type Handler struct {
 	orchestratorClient pb.InferenceServiceClient
 	jobs               JobsService
+	requestTimeout     time.Duration
 }
 
 // NewHandler creates a new gateway handler with the given orchestrator gRPC
@@ -38,7 +43,16 @@ func NewHandler(client pb.InferenceServiceClient, jobsSvc JobsService) *Handler 
 	return &Handler{
 		orchestratorClient: client,
 		jobs:               jobsSvc,
+		requestTimeout:     defaultRequestTimeout,
 	}
+}
+
+// WithRequestTimeout sets the deadline for sync inference calls.
+func (h *Handler) WithRequestTimeout(d time.Duration) *Handler {
+	if d > 0 {
+		h.requestTimeout = d
+	}
+	return h
 }
 
 // --- Request/Response DTOs ---
@@ -116,8 +130,7 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ExecuteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 
@@ -128,7 +141,7 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[gateway] received inference request | prompt_len=%d model=%s", len(req.Prompt), req.Model)
 
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
 	defer cancel()
 
 	grpcResp, err := h.orchestratorClient.ExecuteInference(ctx, &pb.ExecuteInferenceRequest{
@@ -140,7 +153,7 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		log.Printf("[gateway] orchestrator error: %v", err)
-		code, msg := mapGRPCError(err)
+		code, msg := MapGRPCError(err)
 		writeError(w, code, msg)
 		return
 	}
@@ -190,7 +203,14 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	// The gateway cannot serve inference without a serving orchestrator, so
+	// report that to load balancers instead of a blanket 200.
+	code := http.StatusOK
+	if resp.Orchestrator.Status != "SERVING" {
+		resp.Status = "NOT_SERVING"
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, resp)
 }
 
 // HandleSubmitAsync handles POST /v1/inference/execute_async. It validates
@@ -213,8 +233,7 @@ func (h *Handler) HandleSubmitAsync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ExecuteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if req.Prompt == "" {
@@ -270,6 +289,12 @@ func (h *Handler) HandleJobStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "job_id is required")
 		return
 	}
+	// Job IDs are UUIDs; anything else cannot exist, and passing it to
+	// Postgres would fail the uuid cast and surface as a 500.
+	if _, err := uuid.Parse(jobID); err != nil {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
@@ -308,6 +333,21 @@ func (h *Handler) HandleJobStatus(w http.ResponseWriter, r *http.Request) {
 
 // --- Helpers ---
 
+// decodeBody decodes the JSON body into dst, writing 413 for an oversized
+// body and 400 for anything else that fails. It reports whether to continue.
+func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return false
+	}
+	return true
+}
+
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -318,10 +358,11 @@ func writeError(w http.ResponseWriter, code int, message string) {
 	writeJSON(w, code, ErrorResponse{Error: message, Code: code})
 }
 
-// mapGRPCError translates an upstream gRPC error into an HTTP status + a
-// safe message. The orchestrator's status.Error contracts define the
-// mapping; unknown codes default to 502 Bad Gateway.
-func mapGRPCError(err error) (int, string) {
+// MapGRPCError translates an upstream gRPC error into an HTTP status + a
+// message that is safe to show clients. The orchestrator's status.Error
+// contracts define the mapping; unknown codes default to 502 Bad Gateway
+// with a generic message so internal details never leak.
+func MapGRPCError(err error) (int, string) {
 	st, ok := status.FromError(err)
 	if !ok {
 		return http.StatusBadGateway, "inference execution failed"
@@ -329,13 +370,13 @@ func mapGRPCError(err error) (int, string) {
 	switch st.Code() {
 	case codes.InvalidArgument:
 		return http.StatusBadRequest, st.Message()
-	case codes.Unauthenticated:
-		return http.StatusUnauthorized, st.Message()
 	case codes.PermissionDenied:
 		return http.StatusForbidden, st.Message()
 	case codes.ResourceExhausted:
 		// Reserved for the Phase 3 budget guard.
 		return http.StatusPaymentRequired, st.Message()
+	case codes.Unavailable:
+		return http.StatusServiceUnavailable, "service temporarily unavailable"
 	default:
 		return http.StatusBadGateway, "inference execution failed"
 	}

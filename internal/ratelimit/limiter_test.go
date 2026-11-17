@@ -97,3 +97,18 @@ func TestAllow_PerTenantIsolation(t *testing.T) {
 		t.Fatal("tenant-b should not be affected by tenant-a's bucket")
 	}
 }
+
+func TestAllow_EveryIncrementLeavesATTL(t *testing.T) {
+	mr := miniredis.RunT(t)
+	l := New(goredis.NewClient(&goredis.Options{Addr: mr.Addr()}))
+	for range 3 {
+		if _, err := l.Allow(t.Context(), "t1", 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, k := range mr.Keys() {
+		if ttl := mr.TTL(k); ttl <= 0 {
+			t.Fatalf("key %s has no TTL", k)
+		}
+	}
+}

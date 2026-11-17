@@ -15,8 +15,7 @@ type stubReader struct {
 	mtdCalls    int
 	limits      *Limits
 	limitsErr   error
-	mtd         float64
-	mtdErr      error
+	reserve     *Reservation
 }
 
 func (s *stubReader) GetLimits(_ context.Context, _ string) (*Limits, error) {
@@ -24,10 +23,12 @@ func (s *stubReader) GetLimits(_ context.Context, _ string) (*Limits, error) {
 	return s.limits, s.limitsErr
 }
 
-func (s *stubReader) MonthToDate(_ context.Context, _ string) (float64, error) {
+func (s *stubReader) Reserve(_ context.Context, _ string, _, _ float64) (*Reservation, error) {
 	s.mtdCalls++
-	return s.mtd, s.mtdErr
+	return s.reserve, nil
 }
+
+func (s *stubReader) Settle(_ context.Context, _ *Reservation, _ float64) error { return nil }
 
 func newTestRedis(t *testing.T) *goredis.Client {
 	t.Helper()
@@ -71,22 +72,22 @@ func TestCached_GetLimits_MissPropagatesInnerError(t *testing.T) {
 	}
 }
 
-func TestCached_MonthToDate_AlwaysHitsInner(t *testing.T) {
+func TestCached_Reserve_AlwaysHitsInner(t *testing.T) {
 	rds := newTestRedis(t)
-	inner := &stubReader{mtd: 4.2}
+	inner := &stubReader{reserve: &Reservation{SpentUSD: 4.2}}
 	c := &CachedRepository{inner: inner, rds: rds, ttl: time.Minute}
 
 	for range 3 {
-		got, err := c.MonthToDate(t.Context(), "t1")
+		got, err := c.Reserve(t.Context(), "t1", 0.1, 10)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got != 4.2 {
-			t.Errorf("expected 4.2, got %f", got)
+		if got.SpentUSD != 4.2 {
+			t.Errorf("expected 4.2, got %f", got.SpentUSD)
 		}
 	}
 	if inner.mtdCalls != 3 {
-		t.Errorf("expected MonthToDate to bypass cache (3 calls), got %d", inner.mtdCalls)
+		t.Errorf("expected Reserve to bypass cache (3 calls), got %d", inner.mtdCalls)
 	}
 }
 

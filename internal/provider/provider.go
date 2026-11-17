@@ -1,12 +1,18 @@
 // Package provider defines the abstraction for LLM inference providers.
 package provider
 
-import "context"
+import (
+	"context"
+	"errors"
+	"net"
+)
 
 // InferenceRequest represents a normalized request to any LLM provider.
 type InferenceRequest struct {
 	Prompt string
 	Model  string
+	// MaxTokens caps the completion length; 0 means the provider default.
+	MaxTokens int32
 }
 
 // InferenceResponse represents a normalized response from any LLM provider.
@@ -47,4 +53,37 @@ type Provider interface {
 	// Pricing returns the per-token rates for the given model. Returns zero
 	// rates and ok=false for an unknown model.
 	Pricing(model string) (Pricing, bool)
+}
+
+// nonRetryableError marks a failure that retrying cannot fix, such as a
+// bad request or an unknown model.
+type nonRetryableError struct{ err error }
+
+func (e nonRetryableError) Error() string { return e.err.Error() }
+func (e nonRetryableError) Unwrap() error { return e.err }
+
+// NonRetryable wraps err so IsRetryable reports false for it.
+func NonRetryable(err error) error {
+	if err == nil {
+		return nil
+	}
+	return nonRetryableError{err: err}
+}
+
+// IsRetryable reports whether another attempt at the same provider could
+// succeed. Errors marked NonRetryable are not; neither are timeouts, since a
+// call that already used its whole time budget would only use it again.
+func IsRetryable(err error) bool {
+	var nr nonRetryableError
+	if errors.As(err, &nr) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return false
+	}
+	return true
 }

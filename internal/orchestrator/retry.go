@@ -20,8 +20,9 @@ type RetryConfig struct {
 }
 
 // executeWithRetry runs p.Execute with exponential backoff and full jitter.
-// Context cancellation and context.Canceled errors short-circuit the loop;
-// every other error is treated as retryable so a transient provider blip can
+// Context cancellation and errors provider.IsRetryable rejects (bad
+// requests, timeouts) stop the loop at once so the caller can move on to
+// the fallback; other errors are retried so a transient provider blip can
 // recover without bumping to the fallback.
 func (s *Service) executeWithRetry(
 	ctx context.Context,
@@ -48,6 +49,9 @@ func (s *Service) executeWithRetry(
 		lastErr = err
 
 		if ctx.Err() != nil {
+			return nil, err
+		}
+		if !provider.IsRetryable(err) {
 			return nil, err
 		}
 
