@@ -91,7 +91,7 @@ internal/
 └── observability/            Prometheus metrics and OpenTelemetry tracing
 proto/inference/v1/           gRPC contract between gateway, worker and orchestrator
 deployments/                  Prometheus and Grafana provisioning
-docs/                         API, configuration, observability, changelog and design docs
+docs/                         API, configuration, observability, changelog and diagrams
 ```
 
 ## Build and test
@@ -109,7 +109,6 @@ go test ./internal/...
 - [Configuration](docs/configuration.md): every environment variable and Make command.
 - [Observability](docs/observability.md): metrics, dashboards and traces.
 - [Changelog](docs/changelog.md): what each version added.
-- Design documents: [requirements](docs/Requirement%20Document.pdf), [high-level design](docs/Inference%20Gateway%20HLD.pdf), [low-level design](docs/Inference%20Gateway%20LLD.pdf), [tech stack](docs/Tech%20Stack.pdf) and [execution plan](docs/Execution%20Plan.pdf).
 
 ## Design decisions
 
