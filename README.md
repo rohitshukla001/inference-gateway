@@ -9,12 +9,12 @@
 ## Architecture
 
 <p align="center">
-  <img src="docs/diagram/Inference%20Gateway%20%E2%80%94%20System%20Architecture.png" alt="System architecture: client to HTTP gateway, gRPC orchestrator, LLM provider, with NATS, worker, Redis, Postgres and the observability stack">
+  <img src="docs/diagram/Inference%20Gateway%20-%20System%20Architecture.png" alt="System architecture: client to HTTP gateway, gRPC orchestrator, LLM provider, with NATS, worker, Redis, Postgres and the observability stack">
 </p>
 
 | Sync request | Async request |
 | --- | --- |
-| <img src="docs/diagram/Inference%20Gateway%20%E2%80%94%20Sync%20Request%20Flow.png" alt="Sync request flow from client through gateway and orchestrator to the provider and back"> | <img src="docs/diagram/Inference%20Gateway%20%E2%80%94%20Async%20Request%20Flow.png" alt="Async request flow: gateway stores a job, publishes to JetStream, worker runs it through the orchestrator"> |
+| <img src="docs/diagram/Inference%20Gateway%20-%20Sync%20Request%20Flow.png" alt="Sync request flow from client through gateway and orchestrator to the provider and back"> | <img src="docs/diagram/Inference%20Gateway%20-%20Async%20Request%20Flow.png" alt="Async request flow: gateway stores a job, publishes to JetStream, worker runs it through the orchestrator"> |
 
 A client calls the HTTP gateway with an API key. The gateway resolves the tenant, applies its rate limit and forwards the call over gRPC. The orchestrator picks a model, checks the cache and the budget, then calls the provider. Async calls go through a JetStream queue and a worker to reach the same orchestrator, so both paths get identical routing, caching and billing.
 
