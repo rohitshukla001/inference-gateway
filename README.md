@@ -1,347 +1,133 @@
-# Inference Gateway
+<h1 align="center">Inference Gateway</h1>
 
-A centralized Go microservice that acts as a unified gateway for LLM inference calls. Routes requests through a clean service boundary: **HTTP Gateway → gRPC Orchestrator → LLM Provider**.
+<p align="center"><b>One gateway for every LLM call. Concurrent calls can't race past a tenant's budget, a retried request never bills twice, and a worker crash never leaves an async job stuck.</b></p>
+
+<p align="center">
+  Go 1.25 &nbsp;·&nbsp; gRPC &nbsp;·&nbsp; Postgres &nbsp;·&nbsp; Redis &nbsp;·&nbsp; NATS JetStream &nbsp;·&nbsp; OpenTelemetry &nbsp;·&nbsp; Runs locally on Ollama
+</p>
 
 ## Architecture
 
-```
-┌──────────┐  HTTP   ┌──────────────┐   gRPC    ┌──────────────┐   HTTP   ┌──────────┐
-│  Client  │ ──────▶│   Gateway    │ ────────▶ │ Orchestrator │ ───────▶ │  Ollama  │
-│  (curl)  │ ◀──────│  (:8080)     │ ◀──────── │   (:9090)    │ ◀─────── │ (:11434) │
-└──────────┘  JSON   └──┬────────┬──┘           └──────▲───────┘          └──────────┘
-                        │        │ async               │ gRPC
-                        │        ▼                     │
-                        │     ┌──────┐    NATS    ┌────┴─────┐
-                        │     │ NATS │───────────▶│  Worker  │
-                        │     │ :4222│            │          │
-                        │     └──────┘            └──────────┘
-                        ▼
-                    ┌─────────┐
-                    │Postgres │  (jobs, tenants, usage, policies, budgets)
-                    │  :5432  │
-                    └─────────┘
-```
+<p align="center">
+  <img src="docs/diagram/Inference%20Gateway%20%E2%80%94%20System%20Architecture.png" alt="System architecture: client to HTTP gateway, gRPC orchestrator, LLM provider, with NATS, worker, Redis, Postgres and the observability stack">
+</p>
 
-## Quick Start (3 Steps)
+| Sync request | Async request |
+| --- | --- |
+| <img src="docs/diagram/Inference%20Gateway%20%E2%80%94%20Sync%20Request%20Flow.png" alt="Sync request flow from client through gateway and orchestrator to the provider and back"> | <img src="docs/diagram/Inference%20Gateway%20%E2%80%94%20Async%20Request%20Flow.png" alt="Async request flow: gateway stores a job, publishes to JetStream, worker runs it through the orchestrator"> |
 
-### Prerequisites
+A client calls the HTTP gateway with an API key. The gateway resolves the tenant, applies its rate limit and forwards the call over gRPC. The orchestrator picks a model, checks the cache and the budget, then calls the provider. Async calls go through a JetStream queue and a worker to reach the same orchestrator, so both paths get identical routing, caching and billing.
 
-- Go 1.22+
-- Docker & Docker Compose
-- protoc + Go plugins (`make proto-install`)
+## Run it in 3 steps
 
-### 1. Start Infrastructure
+You need Go 1.25+ and Docker.
+
+1. **Start the infrastructure.** `make up` starts Postgres, Redis, NATS, Ollama, Prometheus, Grafana and Jaeger. Then `make pull-model` downloads llama3.2 (about 2 GB, first time only).
+2. **Start the services,** one per terminal: `make run-orchestrator`, `make run-gateway`, and `make run-worker` for the async path. The gateway applies the database migrations on startup.
+3. **Send a request** with the seeded dev key:
 
 ```bash
-make up
-make pull-model   # Downloads llama3.2 (~2GB, first time only)
-```
-
-### 2. Generate Proto & Start Services
-
-```bash
-make proto
-
-# Terminal 1
-make run-orchestrator
-
-# Terminal 2
-make run-gateway
-
-# Terminal 3 (only needed for the async path)
-make run-worker
-```
-
-### 3. Test It
-
-```bash
-# Health check (no auth)
-curl http://localhost:8080/health
-
-# Execute inference (requires Bearer API key)
 curl -X POST http://localhost:8080/v1/inference/execute \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer dev-key-tenant-acme" \
   -d '{"prompt": "Say hello in one sentence."}'
 ```
 
-The `dev-key-tenant-acme` key is seeded automatically by migration `003_seed_dev_tenant.up.sql` for local use.
+The reply carries the output, the model that served it, token usage and the cost of the call. Every endpoint is in the [API reference](docs/api.md).
 
-## Authentication
+## How it stays correct
 
-The gateway uses **API key auth** via `Authorization: Bearer <key>`. Keys are stored as `sha256(key)` in Postgres, never in plaintext. Resolved keys are cached in Redis by hash for `AUTH_CACHE_TTL` (default 1m), so a revoked key keeps working for at most that long. Each key maps to one tenant; the resolved tenant id is propagated to the orchestrator via the gRPC metadata header `x-tenant-id`.
+Three failures are easy to ship in a gateway like this, and each one has a test that proves it can't happen here.
 
-**Service-to-service auth.** The orchestrator trusts `x-tenant-id`, so it only accepts calls that carry the shared secret `INTERNAL_AUTH_TOKEN` (metadata `x-internal-token`). The gateway, worker and orchestrator all refuse to start without it. `make run-*` sets a dev value; set a real secret anywhere else. gRPC reflection is off unless `GRPC_REFLECTION=true`.
+**Budgets hold under concurrency.** Checking spend and then calling the provider lets ten parallel requests all see the same headroom. Here one Postgres statement reserves the call's projected cost only if it still fits under the monthly limit. After the call, the reservation is settled to the real cost. Forty concurrent callers against a $5 cap get exactly five through (`internal/budget/repository_test.go`). If the budget store is down, paid calls are refused rather than let through uncapped.
 
-To add more tenants/keys, write SQL into a new migration file under `internal/db/migrations/`. An admin API is planned for a later phase.
+**A retry never bills twice.** An `Idempotency-Key` is claimed in Redis with `SET NX` before the call runs. A duplicate that arrives while the first call is still running gets `409`. One that arrives after a success gets the stored response, and the same key with a different body gets `422` (`internal/gateway/middleware/idempotency_test.go`).
 
-## Routing and budgets
+**No async job gets stuck.** A worker acknowledges a JetStream message only after writing the job's result. If it crashes first, the message goes to another worker, and a job that was already running is marked failed by a sweeper after five minutes (`internal/jobs/repository_test.go`). Either way, a client polling the job reaches an end state. On shutdown, a worker stops pulling and finishes the jobs it started (`internal/worker/worker_nats_test.go`).
 
-The orchestrator picks a model per request via a rule-based router. The static catalog (`internal/router/catalog.go`) lists each `(provider, model)` along with its tier, per-1k pricing, and p95 latency.
+## What it does
 
-Tenants get two policy tables:
+The router picks a model per request from a static catalog of three: `llama3.2` on Ollama, and `gpt-4o-mini` and `gpt-4o` on a mock provider that simulates their pricing and latency. It filters by the tenant's allowed models, the request's `max_cost` and `latency_sla_ms`, then takes the cheapest model in the tenant's preferred tier. If the chosen provider fails or is known to be down, the call falls back to local Ollama.
 
-- `tenant_policies` — `allowed_models` (JSONB array) and a `default_tier` (`cheap` / `default` / `premium`). The dev tenant is seeded with all three demo models allowed and tier `default`.
-- `tenant_budgets` — `monthly_limit_usd` and `soft_limit_usd`. The dev tenant has a `$10` monthly cap. Before each non-cached call to a paid model, the orchestrator atomically reserves the projected cost in `tenant_monthly_spend` and rejects with `402 Payment Required` if it would push month-to-date spend past `monthly_limit`. After the call it settles the reservation to the actual cost (zero if the call failed). Because the check and the increment are one statement, concurrent calls cannot overshoot the cap. If the budget store is unreachable, paid calls are refused with `503`. The projection assumes at most 512 output tokens, and that cap is sent to the provider.
+Around the router sit the pieces a shared gateway needs:
 
-The router always pairs cloud-style providers with a 1-deep fallback to the local Ollama model. If the primary provider fails, the orchestrator transparently retries against Ollama (and tags the usage row with the actual served model).
+- an exact-match response cache in Redis.
+- per-tenant requests-per-second limits.
+- retries with backoff that skip errors a retry can't fix.
+- a usage row with the cost of every call.
+- Prometheus metrics and OpenTelemetry traces across all three services.
 
-## API Reference
+## Security
 
-### `POST /v1/inference/execute`
+API keys are stored only as SHA-256 hashes. The orchestrator trusts the tenant ID it is sent, so it accepts calls only from services holding the shared `INTERNAL_AUTH_TOKEN`. Every service refuses to start without one. Request bodies are capped at 1 MiB, internal errors reach clients as generic messages, and compose binds every port to `localhost`.
 
-Execute an LLM inference request. **Requires `Authorization: Bearer <key>`.**
+## Tech stack
 
-**Request:**
-```json
-{
-  "prompt": "Explain microservices in one sentence.",
-  "model": "gpt-4o-mini",
-  "max_cost": 0.01,
-  "latency_sla_ms": 500
-}
-```
+- Go 1.25, gRPC and Protocol Buffers
+- Postgres 16 for tenants, policies, budgets, usage and jobs, with embedded migrations
+- Redis 7 for the response cache, idempotency keys, rate limits and config caches
+- NATS JetStream for the async job queue
+- Ollama with llama3.2 as the local model
+- Prometheus metrics, OpenTelemetry traces in Jaeger, Grafana dashboards
 
-All routing fields are optional:
-
-| Field | Effect |
-|---|---|
-| `model` | Pin a specific model. Must be in the tenant's `allowed_models`; rejected with 403 otherwise. |
-| `max_cost` | Filter the catalog to models whose worst-case projected cost fits the cap. Cheapest survivor wins. |
-| `latency_sla_ms` | Filter the catalog to models whose p95 latency fits the SLA. |
-
-If none are set, the router picks the cheapest model in the tenant's `default_tier`.
-
-**Response:**
-```json
-{
-  "output": "Microservices is an architectural approach...",
-  "model": "gpt-4o-mini",
-  "provider": "mock",
-  "usage": {
-    "prompt_tokens": 12,
-    "completion_tokens": 45,
-    "total_tokens": 57
-  },
-  "cached": false,
-  "cost": 0.000029
-}
-```
-
-`cached` is `true` when the response was served from the Redis exact-match cache (the cache key includes the chosen model). `cost` is the actual USD cost of this call computed from token counts × per-1k rates from the catalog; `0` for cache hits and for local Ollama responses.
-
-**Optional headers:**
-
-| Header | Effect |
-|---|---|
-| `Idempotency-Key: <any-string>` | Within `IDEMPOTENCY_TTL` (default 24h), repeated calls with the same key + tenant return the original response verbatim. The replay carries `Idempotent-Replay: true`. A repeat that arrives while the first call is still running gets `409` with `Retry-After`; reusing a key with a different body gets `422`. Failed calls release the key so the client can retry. |
-
-Request bodies over `MAX_REQUEST_BYTES` (default 1 MiB) are rejected with `413`.
-
-**Rate limiting:**
-
-Each tenant has a per-second request cap stored in `tenant_rate_limits` (`rps`; `0` means unlimited), cached in Redis for `CONFIG_CACHE_TTL`. Requests above the cap are rejected with `429 Too Many Requests` and a `Retry-After` header in seconds. The dev tenant is seeded with `60 rps`. Both repo and Redis errors fail open so a transient infra blip does not black-hole traffic.
-
-### `POST /v1/inference/execute_async`
-
-Submit an inference request for asynchronous execution. The body is identical to `/v1/inference/execute`. The gateway persists a pending job, publishes it to a NATS JetStream stream (`INFERENCE_JOBS`) for a worker to pick up, and returns once the broker has stored the message. If the publish fails, the job is marked `failed` and the request returns `500`, so resubmit.
-
-Workers share a durable consumer, run up to `WORKER_CONCURRENCY` jobs each, and acknowledge a message only after the job's result is written. A message whose worker dies is redelivered. On shutdown a worker stops pulling and lets in-flight jobs finish.
-
-**Response:** `202 Accepted`
-```json
-{
-  "job_id": "9b2f3c50-...",
-  "status": "pending"
-}
-```
-
-### `GET /v1/jobs/{job_id}`
-
-Poll the state of an async job. The job is scoped to the calling tenant; requesting another tenant's job returns `404`.
-
-**Response (pending or running):**
-```json
-{
-  "job_id": "9b2f3c50-...",
-  "status": "running",
-  "created_at": "2026-05-01T18:32:11Z",
-  "started_at": "2026-05-01T18:32:12Z"
-}
-```
-
-**Response (completed):**
-```json
-{
-  "job_id": "9b2f3c50-...",
-  "status": "completed",
-  "created_at": "2026-05-01T18:32:11Z",
-  "started_at": "2026-05-01T18:32:12Z",
-  "completed_at": "2026-05-01T18:32:14Z",
-  "result": {
-    "output": "...",
-    "model": "gpt-4o-mini",
-    "provider": "mock",
-    "usage": { "prompt_tokens": 12, "completion_tokens": 45, "total_tokens": 57 },
-    "cached": false,
-    "cost": 0.000029
-  }
-}
-```
-
-**Response (failed):**
-```json
-{
-  "job_id": "9b2f3c50-...",
-  "status": "failed",
-  "created_at": "2026-05-01T18:32:11Z",
-  "completed_at": "2026-05-01T18:32:14Z",
-  "error": "rpc error: code = ResourceExhausted desc = monthly budget exceeded..."
-}
-```
-
-A worker that dies mid-job leaves the row in `running`, and a job whose message is dropped after repeated delivery failures leaves it in `pending`. The sweeper inside the worker process flips both kinds of orphan row to `failed` after `STUCK_JOB_THRESHOLD` (default 5m) so polling clients eventually see closure.
-
-### `GET /health`
-
-Health check for gateway and orchestrator. Returns `503` with `"status": "NOT_SERVING"` when the orchestrator is unreachable or has no healthy provider.
-
-**Response:**
-```json
-{
-  "status": "SERVING",
-  "gateway": "healthy",
-  "orchestrator": {
-    "status": "SERVING",
-    "version": "0.1.0"
-  }
-}
-```
-
-## Project Structure
+## Project structure
 
 ```
-inference-gateway/
-├── cmd/
-│   ├── gateway/          # HTTP entry point
-│   ├── orchestrator/     # gRPC service
-│   └── worker/           # Async job consumer
-├── internal/
-│   ├── config/           # Environment-based configuration
-│   ├── gateway/          # HTTP handlers + REST → gRPC translation
-│   ├── orchestrator/     # gRPC service implementation
-│   ├── jobs/             # Async job state machine, repo, queue facade
-│   ├── messaging/
-│   │   └── natsclient/   # NATS connection wrapper
-│   ├── observability/
-│   │   ├── metrics/      # Prometheus collectors + admin server
-│   │   └── tracing/      # OpenTelemetry init helper
-│   ├── ratelimit/        # Per-tenant Redis fixed-window limiter
-│   ├── worker/           # Worker subscribe/claim/execute loop + sweeper
-│   └── provider/         # Provider abstraction
-│       ├── health/       # Periodic provider health checker
-│       └── ollama/       # Ollama provider implementation
-├── deployments/
-│   ├── prometheus/       # Prometheus scrape config
-│   └── grafana/          # Grafana provisioning + dashboards
-├── proto/
-│   └── inference/v1/     # Protobuf service definition
-├── docker-compose.yml    # Local infrastructure (Ollama, Postgres, Redis, NATS, Prometheus, Grafana, Jaeger)
-├── Makefile              # Developer commands
-└── README.md
+cmd/
+├── gateway/                  HTTP entry point
+├── orchestrator/             gRPC service
+└── worker/                   Async job consumer
+internal/
+├── gateway/                  HTTP handlers, middleware (auth, rate limit, idempotency, body limit)
+├── orchestrator/             Routing, cache, budget and fallback for each call
+├── router/                   Model catalog, cost estimates, selection rules
+├── budget/                   Atomic spend reservation and settlement
+├── policy/  tenant/          Tenant routing policy and API-key lookup, with Redis caches
+├── ratelimit/                Per-tenant fixed-window limiter
+├── jobs/  worker/            Async job state, JetStream publisher, worker pool and sweeper
+├── provider/                 Provider interface, Ollama, mock, health checker
+├── cache/  usage/            Response cache and usage records
+├── messaging/  db/  redis/   Connections and migrations
+└── observability/            Prometheus metrics and OpenTelemetry tracing
+proto/inference/v1/           gRPC contract between gateway, worker and orchestrator
+deployments/                  Prometheus and Grafana provisioning
+docs/                         API, configuration, observability, changelog and design docs
 ```
 
-## Make Commands
+## Build and test
 
-| Command | Description |
-|---------|-------------|
-| `make run-gateway` | Start gateway HTTP server (:8080) |
-| `make run-orchestrator` | Start orchestrator gRPC server (:9090) |
-| `make run-worker` | Start async job worker |
-| `make proto` | Generate Go code from proto definitions |
-| `make up` | Start infrastructure containers |
-| `make down` | Stop infrastructure containers |
-| `make build` | Build both service binaries |
-| `make test-e2e` | Run end-to-end smoke test |
-| `make pull-model` | Pull llama3.2 into Ollama |
+```bash
+make build
+go test ./internal/...
+```
 
-## Configuration
+`make build` writes the three binaries to `bin/`. The tests that need Postgres or NATS skip themselves when those aren't running, so `make up` first for the full suite. The end-to-end tests in `test/` call a running gateway, so start the services before `go test ./test/`.
 
-Environment variables with defaults. A malformed duration or integer stops the service at startup.
+## Docs
 
-| Variable | Default | Service |
-|----------|---------|---------|
-| `GATEWAY_HTTP_PORT` | `8080` | Gateway |
-| `INTERNAL_AUTH_TOKEN` | *(required)* | Gateway, Orchestrator, Worker |
-| `GATEWAY_REQUEST_TIMEOUT` | `120s` | Gateway |
-| `MAX_REQUEST_BYTES` | `1048576` | Gateway |
-| `AUTH_CACHE_TTL` | `1m` | Gateway |
-| `GRPC_REFLECTION` | `false` | Orchestrator |
-| `WORKER_CONCURRENCY` | `4` | Worker |
-| `ORCHESTRATOR_GRPC_ADDR` | `localhost:9090` | Gateway |
-| `ORCHESTRATOR_GRPC_PORT` | `9090` | Orchestrator |
-| `OLLAMA_ENDPOINT` | `http://localhost:11434` | Orchestrator |
-| `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Orchestrator |
-| `OLLAMA_TIMEOUT` | `120s` | Orchestrator |
-| `RETRY_MAX_ATTEMPTS` | `3` | Orchestrator |
-| `RETRY_BASE_BACKOFF` | `100ms` | Orchestrator |
-| `RETRY_MAX_BACKOFF` | `2s` | Orchestrator |
-| `HEALTH_INTERVAL` | `15s` | Orchestrator |
-| `HEALTH_TIMEOUT` | `3s` | Orchestrator |
-| `CONFIG_CACHE_TTL` | `5m` | Gateway, Orchestrator |
-| `POSTGRES_URL` | `postgres://inference:inference@localhost:5432/inference_gateway?sslmode=disable` | Gateway, Orchestrator, Worker |
-| `REDIS_URL` | `redis://localhost:6379/0` | Gateway, Orchestrator |
-| `NATS_URL` | `nats://localhost:4222` | Gateway, Worker |
-| `OTLP_ENDPOINT` | `localhost:4317` | Gateway, Orchestrator, Worker |
-| `ORCHESTRATOR_ADMIN_PORT` | `9091` | Orchestrator |
-| `CACHE_TTL` | `1h` | Orchestrator |
-| `IDEMPOTENCY_TTL` | `24h` | Gateway |
-| `JOB_TIMEOUT` | `2m` | Worker |
-| `SWEEP_INTERVAL` | `30s` | Worker |
-| `STUCK_JOB_THRESHOLD` | `5m` | Worker |
+- [API reference](docs/api.md): endpoints, headers, status codes and examples.
+- [Configuration](docs/configuration.md): every environment variable and Make command.
+- [Observability](docs/observability.md): metrics, dashboards and traces.
+- [Changelog](docs/changelog.md): what each version added.
+- Design documents: [requirements](docs/Requirement%20Document.pdf), [high-level design](docs/Inference%20Gateway%20HLD.pdf), [low-level design](docs/Inference%20Gateway%20LLD.pdf), [tech stack](docs/Tech%20Stack.pdf) and [execution plan](docs/Execution%20Plan.pdf).
 
-## Observability
+## Design decisions
 
-`make up` boots the full observability stack alongside the data plane:
+- The budget check refuses paid calls when Postgres is unreachable, while rate limiting allows calls when Redis is unreachable. An outage should never mean unlimited spend, and it shouldn't mean a blocked tenant either.
+- A response from the fallback model is never cached. The cache key names the primary model, so the next caller would get the fallback's answer under the primary's name.
+- Rate limiting uses a one-second fixed window. It costs one atomic Redis transaction per request, at the cost of allowing up to twice the limit in a burst that straddles a second boundary.
+- Services authenticate to each other with a shared token rather than mTLS, which closes the trust gap without certificate management. mTLS is the next step for a real deployment.
 
-| URL | What |
-|-----|------|
-| `http://localhost:8080/metrics` | Gateway Prometheus metrics |
-| `http://localhost:9091/metrics` | Orchestrator Prometheus metrics |
-| `http://localhost:9091/health/providers` | Per-provider health snapshot (JSON) |
-| `http://localhost:9094` | Prometheus UI |
-| `http://localhost:3000` | Grafana (anonymous admin login enabled) |
-| `http://localhost:16686` | Jaeger UI |
+## Disclaimer
 
-The pre-provisioned Grafana dashboard ("Inference Gateway") covers the four LLD panels: gateway RPS, P95 inference latency, cache hit ratio, and cost per tenant, plus a provider failure rate panel.
+Inference Gateway is an independent project. It is not affiliated with, endorsed by or sponsored by OpenAI, Meta or Ollama. The `gpt-4o` and `gpt-4o-mini` names label a local mock provider, and the gateway makes no calls to OpenAI.
 
-**Key metrics**
+## License
 
-| Metric | Type | Labels |
-|--------|------|--------|
-| `gateway_http_requests_total` | counter | method, route, status |
-| `gateway_http_request_duration_seconds` | histogram | method, route, status |
-| `inference_latency_seconds` | histogram | tenant, model, provider, status (`ok` / `cached` / `error`) |
-| `cache_hits_total` / `cache_misses_total` | counter | tenant, model |
-| `provider_failures_total` | counter | provider, model |
-| `inference_cost_usd_total` | counter | tenant, model, provider |
+Copyright 2026 Rohit Shukla. All rights reserved.
 
-Routes are templated to keep cardinality bounded (`/v1/jobs/{id}` rather than the raw UUID). `tenant` is intentionally a label so per-tenant dashboards work; in a real production deployment with thousands of tenants this would need to be hashed or dropped to keep cardinality in check.
+No license is granted. You can read the code here, but you may not copy, modify or distribute it without written permission.
 
-**Tracing**
+---
 
-OTLP gRPC traces are exported to Jaeger via `localhost:4317`. The propagation chain produces traces of the form `gateway → orchestrator → cache.lookup → provider.execute` for sync calls and `worker → orchestrator → cache.lookup → provider.execute` for async jobs.
-
-## Version
-
-`v0.6.0` — Phase 6: Production hardening. Adds configurable Ollama HTTP timeout, exponential-backoff retries with full jitter on every provider call (3 attempts by default), a background per-provider health checker that lets the orchestrator skip a known-bad primary and exposes `/health/providers` on the admin port, Redis read-through caching for tenant policies and budget limits (`CONFIG_CACHE_TTL`, default 5m), and per-tenant request rate limiting via a Redis fixed-window-per-second counter that returns `429 Too Many Requests` with a `Retry-After` header. New table `tenant_rate_limits`; the dev tenant is seeded at 60 rps.
-
-`v0.5.0` — Phase 5: Observability. Adds Prometheus metrics on both gateway and orchestrator (admin port `:9091` for the orchestrator, `/metrics` on the gateway HTTP port), Prometheus + Grafana + Jaeger containers in docker-compose with provisioned datasource and dashboard, and OpenTelemetry tracing wired across gateway HTTP, orchestrator gRPC, worker gRPC, and the orchestrator's internal cache and provider seams.
-
-`v0.4.0` — Phase 4: Async pipeline. Adds NATS broker, `jobs` table + state machine (`pending → running → completed|failed`), `POST /v1/inference/execute_async` and `GET /v1/jobs/{id}` endpoints, a standalone worker binary that consumes the queue and reuses the orchestrator's gRPC `ExecuteInference` (so async jobs go through the same routing, cache, budget guard, and usage tracking as sync calls), and a sweeper that times out orphan jobs.
-
-`v0.3.0` — Phase 3: Smart routing across multiple providers (Ollama + mock OpenAI-style) driven by tenant policy, request `max_cost`, and `latency_sla_ms`. Adds `tenant_policies` and `tenant_budgets` tables, a budget guard that rejects with `402 Payment Required` when month-to-date spend would exceed the cap, and a 1-deep Ollama fallback for primary failures. Response now carries `cost`.
-
-`v0.2.0` — Phase 2: Adds Redis exact-match response cache, `Idempotency-Key` middleware, and per-request usage tracking written to Postgres (`usage_records`).
-
-`v0.1.0` — Phase 1: Thin vertical slice with HTTP gateway, gRPC orchestrator, Ollama provider, and API-key + tenant resolution.
+Designed and developed by Rohit Shukla
