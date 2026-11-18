@@ -3,6 +3,10 @@
 <p align="center"><b>One gateway for every LLM call. Concurrent calls can't race past a tenant's budget, a retried request never bills twice, and a worker crash never leaves an async job stuck.</b></p>
 
 <p align="center">
+  <a href="https://github.com/rohitshukla001/inference-gateway/actions/workflows/ci.yml"><img src="https://github.com/rohitshukla001/inference-gateway/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+</p>
+
+<p align="center">
   Go 1.25 &nbsp;·&nbsp; gRPC &nbsp;·&nbsp; Postgres &nbsp;·&nbsp; Redis &nbsp;·&nbsp; NATS JetStream &nbsp;·&nbsp; OpenTelemetry &nbsp;·&nbsp; Runs locally on Ollama
 </p>
 
@@ -44,6 +48,17 @@ Three failures are easy to ship in a gateway like this, and each one has a test 
 **A retry never bills twice.** An `Idempotency-Key` is claimed in Redis with `SET NX` before the call runs. A duplicate that arrives while the first call is still running gets `409`. One that arrives after a success gets the stored response, and the same key with a different body gets `422` (`internal/gateway/middleware/idempotency_test.go`).
 
 **No async job gets stuck.** A worker acknowledges a JetStream message only after writing the job's result. If it crashes first, the message goes to another worker, and a job that was already running is marked failed by a sweeper after five minutes (`internal/jobs/repository_test.go`). Either way, a client polling the job reaches an end state. On shutdown, a worker stops pulling and finishes the jobs it started (`internal/worker/worker_nats_test.go`).
+
+## Performance
+
+On one laptop, the gateway serves about 4,000 cached requests per second at a p99 of 30 ms. The full path, with a mock provider that sleeps 80 ms per call, runs at about 1,400 requests per second for one tenant.
+
+| Path | Load | Throughput | p50 | p99 |
+|---|---|---|---|---|
+| Cache hit | 50 virtual users | 3,971 req/s | 11.8 ms | 30.4 ms |
+| Full path, mock provider | 200 virtual users | 1,439 req/s | 133.7 ms | 269.3 ms |
+
+Each number is the median of three 30-second k6 runs with no failed requests. At lighter load, the gateway adds about 7 ms at p50 on top of the provider call. The full-path ceiling is the atomic budget check: every paid call locks the tenant's spend row twice, so one tenant tops out near 1,400 paid calls per second. The [performance notes](docs/performance.md) cover the setup, the evidence for that bottleneck, and how to rerun the test.
 
 ## What it does
 
@@ -90,8 +105,11 @@ internal/
 ├── messaging/  db/  redis/   Connections and migrations
 └── observability/            Prometheus metrics and OpenTelemetry tracing
 proto/inference/v1/           gRPC contract between gateway, worker and orchestrator
+test/load/                    k6 load test and its tenant seed
 deployments/                  Prometheus and Grafana provisioning
-docs/                         API, configuration, observability, changelog and diagrams
+docs/                         API, configuration, observability, performance, changelog and diagrams
+.github/workflows/            CI: build, vet, race tests and Docker images
+Dockerfile                    One image definition for all three services
 ```
 
 ## Build and test
@@ -103,11 +121,22 @@ go test ./internal/...
 
 `make build` writes the three binaries to `bin/`. The tests that need Postgres or NATS skip themselves when those aren't running, so `make up` first for the full suite. The end-to-end tests in `test/` call a running gateway, so start the services before `go test ./test/`.
 
+Each service also builds as a container image from the same `Dockerfile`:
+
+```bash
+docker build --build-arg SERVICE=gateway -t inference-gateway-gateway .
+```
+
+`SERVICE` is `gateway`, `orchestrator` or `worker`. The image is a static binary on distroless that runs as a non-root user, about 40 MB.
+
+CI runs on every push and pull request. It builds and vets the code, runs the race-enabled test suite against real Postgres, Redis and JetStream, and builds all three images.
+
 ## Docs
 
 - [API reference](docs/api.md): endpoints, headers, status codes and examples.
 - [Configuration](docs/configuration.md): every environment variable and Make command.
 - [Observability](docs/observability.md): metrics, dashboards and traces.
+- [Performance](docs/performance.md): load-test results, the bottleneck, and how to rerun.
 - [Changelog](docs/changelog.md): what each version added.
 
 ## Design decisions

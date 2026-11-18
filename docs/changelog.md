@@ -44,6 +44,12 @@ Closes the gaps that let a caller bypass auth, overspend a budget, bill a retry 
 - `/health` returns `503` when the orchestrator isn't serving.
 - A job ID that isn't a UUID gets `404` instead of `500`.
 
+### Tooling
+
+- A `Dockerfile` builds each service as a static binary on distroless, running as a non-root user.
+- CI on GitHub Actions builds and vets the code, runs the race-enabled tests against real Postgres, Redis and JetStream, and builds all three images.
+- A k6 load test in `test/load/` measures the cache-hit path and the full path. The results are in `docs/performance.md`.
+
 ## v0.6.0: production hardening
 
 - The Ollama timeout is configurable (`OLLAMA_TIMEOUT`).
