@@ -47,7 +47,7 @@ Closes the gaps that let a caller bypass auth, overspend a budget, bill a retry 
 ### Tooling
 
 - A `Dockerfile` builds each service as a static binary on distroless, running as a non-root user.
-- CI on GitHub Actions builds and vets the code, runs the race-enabled tests against real Postgres, Redis and JetStream, and builds all three images.
+- CI on GitHub Actions lints the code with golangci-lint (including gofmt), builds and vets it, runs the race-enabled tests against real Postgres, Redis and JetStream, and builds all three images.
 - A k6 load test in `test/load/` measures the cache-hit path and the full path. The results are in `docs/performance.md`.
 
 ## v0.6.0: production hardening

@@ -9,6 +9,19 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Runs the default linters plus the gofmt check from .golangci.yml.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.2
+
   test:
     name: Build, vet and test
     runs-on: ubuntu-latest

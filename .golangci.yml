@@ -1,0 +1,10 @@
+version: "2"
+
+linters:
+  exclusions:
+    # Skips unchecked errors from deferred Close, Flush and print calls,
+    # where nothing useful can be done with the error.
+    presets: [std-error-handling]
+
+formatters:
+  enable: [gofmt]

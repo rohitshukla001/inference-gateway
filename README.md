@@ -108,7 +108,7 @@ proto/inference/v1/           gRPC contract between gateway, worker and orchestr
 test/load/                    k6 load test and its tenant seed
 deployments/                  Prometheus and Grafana provisioning
 docs/                         API, configuration, observability, performance, changelog and diagrams
-.github/workflows/            CI: build, vet, race tests and Docker images
+.github/workflows/            CI: lint, build, vet, race tests and Docker images
 Dockerfile                    One image definition for all three services
 ```
 
@@ -129,7 +129,7 @@ docker build --build-arg SERVICE=gateway -t inference-gateway-gateway .
 
 `SERVICE` is `gateway`, `orchestrator` or `worker`. The image is a static binary on distroless that runs as a non-root user, about 40 MB.
 
-CI runs on every push and pull request. It builds and vets the code, runs the race-enabled test suite against real Postgres, Redis and JetStream, and builds all three images.
+CI runs on every push and pull request. It lints the code with golangci-lint (including gofmt), builds and vets it, runs the race-enabled test suite against real Postgres, Redis and JetStream, and builds all three images.
 
 ## Docs
 

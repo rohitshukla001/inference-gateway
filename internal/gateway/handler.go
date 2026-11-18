@@ -348,7 +348,9 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("[gateway] write response failed: %v", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, code int, message string) {
