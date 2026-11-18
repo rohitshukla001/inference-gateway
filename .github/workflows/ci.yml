@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build, vet and test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: inference
+          POSTGRES_PASSWORD: inference
+          POSTGRES_DB: inference_gateway
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U inference"
+          --health-interval 2s --health-timeout 5s --health-retries 15
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Service containers can't take a command, and the worker tests need
+      # JetStream, so NATS starts here with -js.
+      - name: Start NATS with JetStream
+        run: docker run -d --name nats -p 4222:4222 nats:2.10-alpine -js
+      - run: go build ./...
+      - run: go vet ./...
+      # test/ holds end-to-end tests against a running gateway, so it is
+      # left out. The Postgres and NATS integration tests run for real here
+      # instead of skipping.
+      - run: go test -race -count=1 ./internal/...
+
+  docker:
+    name: Docker image (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, orchestrator, worker]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg SERVICE=${{ matrix.service }} -t inference-gateway-${{ matrix.service }}:ci .
