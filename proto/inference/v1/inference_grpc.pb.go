@@ -27,9 +27,9 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// InferenceService defines the gRPC contract between Gateway and Orchestrator.
+// InferenceService is the gRPC contract the gateway and worker use to call the orchestrator.
 type InferenceServiceClient interface {
-	// ExecuteInference sends a prompt to the configured provider and returns the response.
+	// ExecuteInference routes the prompt to a model, calls its provider and returns the response.
 	ExecuteInference(ctx context.Context, in *ExecuteInferenceRequest, opts ...grpc.CallOption) (*ExecuteInferenceResponse, error)
 	// HealthCheck returns the health status of the orchestrator service.
 	HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error)
@@ -67,9 +67,9 @@ func (c *inferenceServiceClient) HealthCheck(ctx context.Context, in *HealthChec
 // All implementations must embed UnimplementedInferenceServiceServer
 // for forward compatibility.
 //
-// InferenceService defines the gRPC contract between Gateway and Orchestrator.
+// InferenceService is the gRPC contract the gateway and worker use to call the orchestrator.
 type InferenceServiceServer interface {
-	// ExecuteInference sends a prompt to the configured provider and returns the response.
+	// ExecuteInference routes the prompt to a model, calls its provider and returns the response.
 	ExecuteInference(context.Context, *ExecuteInferenceRequest) (*ExecuteInferenceResponse, error)
 	// HealthCheck returns the health status of the orchestrator service.
 	HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error)

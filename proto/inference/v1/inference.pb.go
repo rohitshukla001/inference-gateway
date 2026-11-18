@@ -29,15 +29,13 @@ type ExecuteInferenceRequest struct {
 	// Optional: model name override (e.g., "llama3.2", "gpt-4o-mini").
 	// If empty, the router picks based on tenant policy + hints.
 	Model string `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
-	// Optional: provider name override (e.g., "ollama").
-	// Currently unused for routing; reserved for direct-pin scenarios.
+	// Optional: provider name (e.g., "ollama"). The router does not use it.
 	Provider string `protobuf:"bytes,3,opt,name=provider,proto3" json:"provider,omitempty"`
-	// Optional: maximum cost (USD) the caller will spend on this request.
-	// The router prefers cheaper models when this is set; the budget guard
-	// additionally rejects if the projected cost exceeds the cap.
+	// Optional: maximum projected cost (USD) for this request. The router
+	// considers only models whose worst-case cost fits within it.
 	MaxCost float64 `protobuf:"fixed64,4,opt,name=max_cost,json=maxCost,proto3" json:"max_cost,omitempty"`
-	// Optional: latency SLA in milliseconds. The router prefers models whose
-	// p95 latency fits within this budget.
+	// Optional: latency SLA in milliseconds. The router considers only models
+	// whose p95 latency fits within it.
 	LatencySlaMs  int32 `protobuf:"varint,5,opt,name=latency_sla_ms,json=latencySlaMs,proto3" json:"latency_sla_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

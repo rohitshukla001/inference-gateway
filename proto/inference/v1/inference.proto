@@ -4,9 +4,9 @@ package inference.v1;
 
 option go_package = "github.com/rshuklas/inference-gateway/proto/inference/v1;inferencev1";
 
-// InferenceService defines the gRPC contract between Gateway and Orchestrator.
+// InferenceService is the gRPC contract the gateway and worker use to call the orchestrator.
 service InferenceService {
-  // ExecuteInference sends a prompt to the configured provider and returns the response.
+  // ExecuteInference routes the prompt to a model, calls its provider and returns the response.
   rpc ExecuteInference(ExecuteInferenceRequest) returns (ExecuteInferenceResponse);
 
   // HealthCheck returns the health status of the orchestrator service.
@@ -22,17 +22,15 @@ message ExecuteInferenceRequest {
   // If empty, the router picks based on tenant policy + hints.
   string model = 2;
 
-  // Optional: provider name override (e.g., "ollama").
-  // Currently unused for routing; reserved for direct-pin scenarios.
+  // Optional: provider name (e.g., "ollama"). The router does not use it.
   string provider = 3;
 
-  // Optional: maximum cost (USD) the caller will spend on this request.
-  // The router prefers cheaper models when this is set; the budget guard
-  // additionally rejects if the projected cost exceeds the cap.
+  // Optional: maximum projected cost (USD) for this request. The router
+  // considers only models whose worst-case cost fits within it.
   double max_cost = 4;
 
-  // Optional: latency SLA in milliseconds. The router prefers models whose
-  // p95 latency fits within this budget.
+  // Optional: latency SLA in milliseconds. The router considers only models
+  // whose p95 latency fits within it.
   int32 latency_sla_ms = 5;
 }
 

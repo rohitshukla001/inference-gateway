@@ -48,7 +48,7 @@ run-worker:
 # ---- Docker Compose (Infrastructure) ----
 
 up:
-	@echo "==> Starting infrastructure (Ollama, Postgres, Redis)..."
+	@echo "==> Starting infrastructure (Postgres, Redis, NATS, Ollama, Prometheus, Grafana, Jaeger)..."
 	docker-compose up -d
 	@echo "==> Waiting for Ollama..."
 	@sleep 3
@@ -95,13 +95,13 @@ help:
 	@echo ""
 	@echo "  make proto              Generate protobuf Go code"
 	@echo "  make proto-install      Install protoc Go plugins"
-	@echo "  make build              Build gateway + orchestrator binaries"
+	@echo "  make build              Build gateway, orchestrator and worker"
 	@echo "  make run-gateway        Run gateway service (HTTP :8080)"
 	@echo "  make run-orchestrator   Run orchestrator service (gRPC :9090)"
 	@echo "  make run-worker         Run async job worker"
 	@echo "  make up                 Start infrastructure (Docker)"
 	@echo "  make down               Stop infrastructure"
-	@echo "  make test               Run unit tests"
+	@echo "  make test               Run all tests (e2e needs services)"
 	@echo "  make test-e2e           Run end-to-end smoke test"
 	@echo "  make pull-model         Pull llama3.2 into Ollama"
 	@echo "  make deps               Tidy and download Go modules"
