@@ -30,15 +30,15 @@ var ErrNotFound = errors.New("job not found")
 
 // Job is a single async inference job row.
 type Job struct {
-	JobID            string
-	TenantID         string
-	Status           Status
-	RequestPayload   json.RawMessage
-	ResponsePayload  json.RawMessage
-	ErrorMessage     string
-	CreatedAt        time.Time
-	StartedAt        *time.Time
-	CompletedAt      *time.Time
+	JobID           string
+	TenantID        string
+	Status          Status
+	RequestPayload  json.RawMessage
+	ResponsePayload json.RawMessage
+	ErrorMessage    string
+	CreatedAt       time.Time
+	StartedAt       *time.Time
+	CompletedAt     *time.Time
 }
 
 // IsTerminal reports whether the job has finished and won't transition again.

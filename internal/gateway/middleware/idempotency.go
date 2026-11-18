@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rshuklas/inference-gateway/internal/tenant"
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/rshuklas/inference-gateway/internal/tenant"
 )
 
 // IdempotencyHeader is the request header that makes a call safely

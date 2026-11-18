@@ -13,9 +13,9 @@ func TestEstimateTokens(t *testing.T) {
 		want int32
 	}{
 		{"", 0},
-		{"a", 1},                            // floor of 1 even for sub-token strings
-		{strings.Repeat("a", 4), 1},         // 4 chars / 4 = 1 token
-		{strings.Repeat("a", 400), 100},     // proportional
+		{"a", 1},                        // floor of 1 even for sub-token strings
+		{strings.Repeat("a", 4), 1},     // 4 chars / 4 = 1 token
+		{strings.Repeat("a", 400), 100}, // proportional
 		{strings.Repeat("a", 100_000), 25_000},
 	}
 	for _, c := range cases {

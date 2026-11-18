@@ -125,8 +125,8 @@ func (f *flakyProvider) Execute(_ context.Context, _ *provider.InferenceRequest)
 	return f.resp, nil
 }
 
-func (f *flakyProvider) HealthCheck(_ context.Context) error              { return nil }
-func (f *flakyProvider) Pricing(_ string) (provider.Pricing, bool)        { return provider.Pricing{}, true }
+func (f *flakyProvider) HealthCheck(_ context.Context) error       { return nil }
+func (f *flakyProvider) Pricing(_ string) (provider.Pricing, bool) { return provider.Pricing{}, true }
 func TestExecuteWithRetry_StopsOnNonRetryableError(t *testing.T) {
 	for name, err := range map[string]error{
 		"marked non-retryable": provider.NonRetryable(errors.New("bad request")),
